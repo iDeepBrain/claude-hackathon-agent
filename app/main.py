@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.agent.chain import AlmaChain
 from app.api.chat import router as chat_router
+from app.api.cron import router as cron_router
 from app.api.memory import router as memory_router
 from app.api.proactivity import router as proactivity_router
 from app.cache.semantic import SemanticCache
@@ -57,14 +58,19 @@ async def lifespan(app: FastAPI):
     app.state.cache = cache
     app.state.alma_chain = alma_chain
 
+    # Pre-create the redis client used by both APScheduler (local) and
+    # Cloud Scheduler endpoints (production) so they share the same connection.
+    import redis.asyncio as aioredis
+    app.state.scheduler_redis = aioredis.from_url(redis_url)
+
     scheduler = None
     if os.getenv("SCHEDULER_ENABLED", "false").lower() == "true":
-        import redis.asyncio as aioredis
         from app.scheduler.proactive import create_scheduler
-        scheduler_redis = aioredis.from_url(redis_url)
-        scheduler = create_scheduler(scheduler_redis)
+        scheduler = create_scheduler(app.state.scheduler_redis)
         scheduler.start()
-        logger.info("Proactive scheduler started")
+        logger.info("Proactive scheduler (in-process APScheduler) started")
+    else:
+        logger.info("Proactive scheduler disabled — Cloud Scheduler will hit /cron/proactive/{slot}")
 
     logger.info("Alma Agent started")
     yield
@@ -78,6 +84,7 @@ app = FastAPI(title="Alma Agent", lifespan=lifespan)
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(memory_router, prefix="/api/v1")
 app.include_router(proactivity_router, prefix="/api/v1")
+app.include_router(cron_router)  # Cloud Scheduler: /cron/proactive/{slot}
 
 
 @app.get("/health")

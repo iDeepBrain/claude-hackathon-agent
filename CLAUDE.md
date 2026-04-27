@@ -11,14 +11,17 @@ docker compose up --build -d
 
 **No levantar ambos composes simultáneamente** — conflicto en puerto 8080 y Redis duplicado.
 
-## Para desarrollo standalone
+## Para desarrollo standalone (solo si infra NO está corriendo)
 
 ```bash
 cd claude-hackathon-agent
-docker compose up --build -d
+docker compose -f docker-compose.standalone.yml up --build -d
 ```
 
 Levanta: `redis` (6379), `mcp` (8082), `agent` (8080).
+
+> El compose se renombró a `.standalone.yml` para evitar que `docker compose up` lo
+> tome por defecto y conflicte con el stack de `claude-hackathon-infra` (mismos puertos).
 
 ## API endpoints
 
