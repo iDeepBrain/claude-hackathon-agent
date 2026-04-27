@@ -1,0 +1,36 @@
+# Stand-alone: levanta redis + mcp + agent para desarrollo del agent sin telegram-bot.
+# Para levantar el stack completo (incluyendo telegram-bot), usar:
+#   cd ../claude-hackathon-infra && docker compose up
+services:
+  mcp:
+    build:
+      context: ../claude-hackathon-mcp
+    ports:
+      - "8082:8001"
+    env_file: ../claude-hackathon-mcp/.env
+    volumes:
+      - ../claude-hackathon-mcp:/app
+
+  agent:
+    build: .
+    ports:
+      - "8080:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+    env_file: .env
+    volumes:
+      - .:/app
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
