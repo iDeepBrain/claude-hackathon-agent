@@ -1,0 +1,51 @@
+steps:
+  # ── Build ─────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build'
+    args:
+      - build
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alma-agent:$SHORT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alma-agent:latest'
+      - '.'
+
+  # ── Push ──────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push'
+    args:
+      - push
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alma-agent'
+    waitFor: ['build']
+
+  # ── Deploy alma-agent ─────────────────────────────────────────────
+  # Note: MCP_URL must be set via gcloud run services update after first deploy,
+  # or via substitution variable _MCP_URL in the trigger.
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - alma-agent
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alma-agent:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--port=8000'
+      - '--memory=1Gi'
+      - '--cpu=1'
+      - '--min-instances=1'
+      - '--max-instances=3'
+      - '--concurrency=80'
+      - '--set-env-vars=^|^ENVIRONMENT=production|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92'
+      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest'
+    waitFor: ['push']
+
+substitutions:
+  _MCP_URL: 'https://alma-mcp-PLACEHOLDER.us-central1.run.app/mcp'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: '1200s'

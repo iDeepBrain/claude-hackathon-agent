@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/
+.env
+.env.*
+!.env.example
+.git/
+.gitignore
+README.md
+CLAUDE.md
+LICENSE
+docker-compose.yml
