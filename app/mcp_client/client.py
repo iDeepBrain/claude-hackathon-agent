@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -7,6 +8,26 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CONTEXT = "Sin historial previo para este usuario."
+
+
+def _unwrap(result: Any) -> Any:
+    """MCP tool results may arrive wrapped as `[{'type': 'text', 'text': '<json>'}]`.
+
+    Unwrap to the actual payload so callers receive plain dicts/lists/strings.
+    """
+    if (
+        isinstance(result, list)
+        and result
+        and isinstance(result[0], dict)
+        and result[0].get("type") == "text"
+        and "text" in result[0]
+    ):
+        text = result[0]["text"]
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return text
+    return result
 
 
 class MCPClient:
@@ -44,7 +65,8 @@ class MCPClient:
             logger.warning("Tool %r not found in MCP tool map", tool_name)
             return None
         try:
-            return await tool.ainvoke(args)
+            raw = await tool.ainvoke(args)
+            return _unwrap(raw)
         except Exception as exc:
             logger.warning("MCP tool %r failed: %s", tool_name, exc)
             return None
