@@ -3,7 +3,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from app.agent.llm import set_provider
+from app.agent.llm import discover_provider
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -23,27 +23,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 
-async def _check_anthropic() -> bool:
-    try:
-        import anthropic
-        client = anthropic.AsyncAnthropic()
-        await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1,
-            messages=[{"role": "user", "content": "ping"}],
-        )
-        return True
-    except Exception as exc:
-        logger.warning("Anthropic unavailable (%s: %s) — switching to Gemini fallback", type(exc).__name__, exc)
-        return False
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not await _check_anthropic():
-        set_provider("gemini")
-    else:
-        logger.info("Anthropic API reachable — using Claude")
+    try:
+        llm_info = await discover_provider()
+    except RuntimeError as exc:
+        logger.error("LLM discovery failed: %s", exc)
+        llm_info = {"provider": "none", "model": None, "preferred": "claude-opus-4-7", "fallback_reason": str(exc)}
+    app.state.llm_info = llm_info
+    logger.info("LLM elected at startup: %s / %s", llm_info.get("provider"), llm_info.get("model"))
 
     redis_url = os.environ["REDIS_URL"]
     mcp_url = os.environ["MCP_URL"]
@@ -93,9 +81,15 @@ app.include_router(proactivity_router, prefix="/api/v1")
 
 
 @app.get("/health")
-async def health():
-    from app.agent.llm import get_provider
-    return {"status": "ok", "provider": get_provider()}
+async def health(request: Request):
+    info = getattr(request.app.state, "llm_info", {})
+    return {
+        "status": "ok",
+        "provider": info.get("provider", "unknown"),
+        "model": info.get("model"),
+        "preferred": info.get("preferred", "claude-opus-4-7"),
+        "fallback_reason": info.get("fallback_reason"),
+    }
 
 
 @app.exception_handler(Exception)
