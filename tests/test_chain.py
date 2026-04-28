@@ -631,13 +631,19 @@ async def test_render_session_summary_emitted_with_seed_schema():
     assert "tristeza" in week[0]["context"]
 
 
-async def test_render_session_summary_skipped_when_zero_entries():
-    """With ZERO mood entries, the event is suppressed — empty timelines
-    aren't worth rendering. The threshold was lowered to 1 entry so that
-    a fresh user sees their timeline immediately on day one."""
+async def test_render_session_summary_skipped_below_3_entries():
+    """The timeline is meaningful only with multi-day signal. Below 3
+    entries (which in practice means anonymous demo on day 1), the
+    event is suppressed so the panel stays clean. Multi-day signal
+    arrives once the user logs in (Google OAuth in WS-D.1) and their
+    cross-device history is fetched — or after 3+ days of organic
+    usage on the same anonymous UUID."""
     chain, mcp, *_ = make_chain()
     mcp.get_memory = AsyncMock(return_value={
-        "mood_history": [],
+        "mood_history": [
+            {"entry_key": "mood_2026-04-28", "mood_score": 7.0},
+            {"entry_key": "mood_2026-04-27", "mood_score": 6.0},
+        ],
         "mentioned_events": [], "habits": [], "interaction_prefs": [],
     })
     with patch("app.agent.chain.make_llm") as MockLLM:
@@ -652,28 +658,6 @@ async def test_render_session_summary_skipped_when_zero_entries():
 
     summaries = [e for e in events if e["type"] == "render_session_summary"]
     assert summaries == []
-
-
-async def test_render_session_summary_emitted_with_single_entry():
-    """Threshold is now 1 entry — fresh users see the timeline on day one."""
-    chain, mcp, *_ = make_chain()
-    mcp.get_memory = AsyncMock(return_value={
-        "mood_history": [{"entry_key": "mood_2026-04-28", "mood_score": 7.0}],
-        "mentioned_events": [], "habits": [], "interaction_prefs": [],
-    })
-    with patch("app.agent.chain.make_llm") as MockLLM:
-        mock_instance = MagicMock()
-        MockLLM.return_value = mock_instance
-
-        async def fake_astream(messages):
-            yield MagicMock(content="ok")
-
-        mock_instance.astream = fake_astream
-        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
-
-    summaries = [e for e in events if e["type"] == "render_session_summary"]
-    assert len(summaries) == 1
-    assert len(summaries[0]["week"]) == 1
 
 
 async def test_render_session_summary_skipped_on_cache_hit():

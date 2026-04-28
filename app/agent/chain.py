@@ -45,12 +45,15 @@ _EVENT_PHRASES = [
 
 _CRISIS_THRESHOLD = 0.4
 
-# mood_history upserts ONE entry per day (key "mood_<YYYY-MM-DD>"), so a
-# threshold of 3 means the timeline only appears on day 3 of usage. For
-# fresh users that's a poor first impression. Lower to 1 — the panel
-# fills immediately, even if only with today's bar; subsequent days
-# extend it left → right naturally.
-_MOOD_SUMMARY_MIN_ENTRIES = 1
+# mood_history upserts ONE entry per day (key "mood_<YYYY-MM-DD>"), so the
+# threshold is also "minimum days of usage." Set to 3 because a single bar
+# (or even two) doesn't communicate a "week" — it's noise in the panel
+# and confuses anonymous demo users on day one. The timeline appears
+# meaningfully when there's actual multi-day signal — which in practice
+# means after the user logs in (Google OAuth in WS-D.1) and their
+# accumulated data is fetched, OR after 3+ days of organic usage on the
+# same anonymous UUID.
+_MOOD_SUMMARY_MIN_ENTRIES = 3
 _MOOD_SUMMARY_DAYS = 7
 _MEMORY_CARD_MIN_SCORE = 0.6  # below this, the recall isn't confident enough to surface
 _MEMORY_CARD_MAX_CHARS = 280  # cap chunk length so a single big record doesn't dominate UI
