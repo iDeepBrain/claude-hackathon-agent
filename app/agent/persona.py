@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
@@ -8,10 +9,18 @@ _PERSONA_FILES: dict[str, str] = {
 }
 _DEFAULT_LANGUAGE = "es"
 
+# Each prompt file starts with an HTML metadata block holding the version,
+# framework tags, and citation discipline. That block is for humans
+# (review, fixture replay, plugin tooling) — not the LLM. Strip it before
+# we pass the persona into the system prompt so we don't waste tokens or
+# accidentally leak versioning detail into model behavior.
+_METADATA_HEADER_RE = re.compile(r"^\s*<!--.*?-->\s*", re.DOTALL)
+
 
 def load_persona(language: str = _DEFAULT_LANGUAGE) -> str:
     filename = _PERSONA_FILES.get(language, _PERSONA_FILES[_DEFAULT_LANGUAGE])
-    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
+    raw = (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
+    return _METADATA_HEADER_RE.sub("", raw, count=1)
 
 
 def build_system_prompt(context: str, language: str = _DEFAULT_LANGUAGE) -> str:

@@ -27,6 +27,35 @@ def test_load_persona_default_is_spanish():
     assert load_persona() == load_persona("es")
 
 
+def test_load_persona_strips_metadata_header():
+    """The HTML metadata block at the top of each prompt file is for
+    human review (version, framework tags, citation discipline) — it
+    must NEVER reach the LLM as system prompt content. load_persona
+    strips it via regex; this test asserts the contract."""
+    for lang in ("es", "en"):
+        text = load_persona(lang)
+        assert not text.startswith("<!--"), f"{lang}: metadata header leaked into LLM input"
+        assert "<!--" not in text, f"{lang}: metadata block found anywhere in persona"
+        assert "consumed-by:" not in text, f"{lang}: metadata key leaked"
+
+
+def test_load_persona_carries_bias_rules_section():
+    """The asymmetric-cost calibration table is the canonical safety
+    framing. Removing or losing it would silently change Alma's risk
+    posture — guard it with a test."""
+    es = load_persona("es")
+    assert "## Calibración" in es
+    assert "Falso negativo en señal de crisis" in es
+    assert "Una vida" in es
+    assert "NUNCA" in es and "parafrasear" in es
+
+    en = load_persona("en")
+    assert "## Calibration" in en
+    assert "False negative on crisis signal" in en
+    assert "A life" in en
+    assert "NEVER" in en and "paraphrase" in en
+
+
 def test_es_and_en_prompts_are_different():
     assert load_persona("es") != load_persona("en")
 
