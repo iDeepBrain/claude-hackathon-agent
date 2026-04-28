@@ -47,6 +47,40 @@ _CRISIS_THRESHOLD = 0.4
 
 _MOOD_SUMMARY_MIN_ENTRIES = 3  # require at least N mood entries to render the timeline
 _MOOD_SUMMARY_DAYS = 7
+_MEMORY_CARD_MIN_SCORE = 0.6  # below this, the recall isn't confident enough to surface
+_MEMORY_CARD_MAX_CHARS = 280  # cap chunk length so a single big record doesn't dominate UI
+
+
+def _format_memory_chunk(content: object) -> str:
+    """Format a memory record as a compact human-readable single line.
+
+    Records are stored as dicts (e.g. ``{date, event, category}`` for
+    mentioned_events, ``{description, message, response_preview}`` for
+    auto-saved exchanges). Joining the truthy values with `` · `` gives a
+    label-like line, but naive joining duplicates content when one field
+    is a truncated copy of another (``description = message[:120]``). The
+    dedup keeps only the LONGEST value for each substring chain.
+
+    Falsy values (None/""/False) are dropped. The final line is capped at
+    ``_MEMORY_CARD_MAX_CHARS`` so a single record can't dominate the UI.
+    """
+    if isinstance(content, dict):
+        raw = [str(v).strip() for v in content.values() if v not in (None, "", False)]
+        raw = [v for v in raw if v]
+        # Sort longest-first so substring drops are deterministic
+        ordered = sorted(raw, key=len, reverse=True)
+        kept: list[str] = []
+        for v in ordered:
+            # Skip if a longer already-kept value already contains this one
+            if any(v in k for k in kept):
+                continue
+            kept.append(v)
+        text = " · ".join(kept)
+    else:
+        text = str(content) if content is not None else ""
+    if len(text) > _MEMORY_CARD_MAX_CHARS:
+        text = text[: _MEMORY_CARD_MAX_CHARS - 1] + "…"
+    return text
 
 
 def _extract_week_summary(mood_history: list) -> list[dict]:
@@ -175,6 +209,24 @@ class AlmaChain:
             "layers": sorted({r.get("layer") for r in relevant_above if r.get("layer")}),
             "top_score": max((float(r.get("score", 0.0)) for r in relevant_above), default=0.0),
         }
+
+        # If the top retrieved chunk is highly relevant, surface it as a
+        # user-facing card so the user SEES what Alma recalled — verbatim
+        # (anti-hallucination: the LLM doesn't paraphrase the memory; the
+        # exact stored chunk is shown). This is a separate event from
+        # memory_retrieved (which carries metadata only — see privacy test).
+        if relevant_above:
+            top = max(relevant_above, key=lambda r: float(r.get("score", 0.0)))
+            top_score = float(top.get("score", 0.0))
+            if top_score >= _MEMORY_CARD_MIN_SCORE:
+                chunk_text = _format_memory_chunk(top.get("content"))
+                if chunk_text:
+                    yield {
+                        "type": "render_memory_card",
+                        "chunk": chunk_text,
+                        "layer": str(top.get("layer", "")),
+                        "score": round(top_score, 3),
+                    }
 
         model_cfg = route_model(session.state, message, bool(image_b64))
         yield {

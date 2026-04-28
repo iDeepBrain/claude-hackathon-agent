@@ -667,6 +667,140 @@ async def test_render_session_summary_skipped_on_cache_hit():
     mcp.get_memory.assert_not_called()
 
 
+async def test_render_memory_card_emitted_on_high_similarity():
+    """When the top retrieved chunk has score >= 0.6, surface it as a card.
+    The chunk text is emitted verbatim (anti-hallucination) — distinct from
+    memory_retrieved which carries metadata only."""
+    chain, *_ = make_chain(search_results=[
+        {"layer": "mentioned_events",
+         "content": {"event": "Cita médica el viernes", "date": "2026-05-01", "category": "salud"},
+         "score": 0.87},
+    ])
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "viernes", language="es"))
+
+    cards = [e for e in events if e["type"] == "render_memory_card"]
+    assert len(cards) == 1
+    assert "Cita médica el viernes" in cards[0]["chunk"]
+    assert cards[0]["layer"] == "mentioned_events"
+    assert cards[0]["score"] == pytest.approx(0.87)
+
+
+async def test_render_memory_card_skipped_on_low_similarity():
+    chain, *_ = make_chain(search_results=[
+        {"layer": "habits", "content": {"habit": "weak match"}, "score": 0.55},
+    ])
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+
+    cards = [e for e in events if e["type"] == "render_memory_card"]
+    assert cards == []
+
+
+async def test_render_memory_card_chunk_is_verbatim_not_paraphrased():
+    """The chunk in the card MUST come from the stored content exactly,
+    never paraphrased through the LLM. This is the anti-hallucination
+    contract — wrench-board's regex sanitizer + medkit's citation discipline."""
+    secret_marker = "VERBATIM_MARKER_DO_NOT_PARAPHRASE_42"
+    chain, *_ = make_chain(search_results=[
+        {"layer": "mood_history",
+         "content": {"context": secret_marker, "mood_score": 7.0},
+         "score": 0.9},
+    ])
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="paraphrased response")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "x", language="es"))
+
+    cards = [e for e in events if e["type"] == "render_memory_card"]
+    assert len(cards) == 1
+    assert secret_marker in cards[0]["chunk"], (
+        f"Chunk must be verbatim from stored content. Got: {cards[0]['chunk']!r}"
+    )
+
+
+async def test_render_memory_card_dedups_substring_fields():
+    """The auto-saved exchange schema stores `description = message[:120]`
+    AND the full `message` AND a `response_preview` — three fields with
+    the same prefix. Naive join duplicates content. Dedup keeps the
+    longest value for each substring chain."""
+    msg = "tengo cita medica el viernes y estoy nervioso por la consulta"
+    chain, *_ = make_chain(search_results=[
+        {"layer": "mentioned_events",
+         "content": {
+             "description": msg[:30],            # truncated prefix
+             "message": msg,                      # full
+             "response_preview": "Entiendo. Es normal sentir nervios.",
+         },
+         "score": 0.9},
+    ])
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "x", language="es"))
+
+    cards = [e for e in events if e["type"] == "render_memory_card"]
+    assert len(cards) == 1
+    chunk = cards[0]["chunk"]
+    # The description (substring of message) must be dropped
+    assert chunk.count(msg[:30]) == 1, (
+        f"Substring duplicated in chunk: {chunk!r}"
+    )
+    # Full message + response_preview both present (they don't substring-overlap)
+    assert msg in chunk
+    assert "Entiendo. Es normal sentir nervios." in chunk
+    # Result has exactly 2 segments joined by " · "
+    assert chunk.count(" · ") == 1
+
+
+async def test_render_memory_card_caps_long_chunks():
+    """Single-record chunks are capped so they don't dominate the chat
+    visually (and so an attacker who controls memory storage can't flood
+    the SSE channel with huge payloads)."""
+    very_long = "x" * 1000
+    chain, *_ = make_chain(search_results=[
+        {"layer": "habits", "content": {"detail": very_long}, "score": 0.9},
+    ])
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "x", language="es"))
+
+    cards = [e for e in events if e["type"] == "render_memory_card"]
+    assert len(cards) == 1
+    assert len(cards[0]["chunk"]) <= 281  # cap + ellipsis
+    assert cards[0]["chunk"].endswith("…")
+
+
 async def test_render_session_summary_takes_last_7_days_only():
     """If mood_history has > 7 entries, only the most recent 7 are emitted."""
     chain, mcp, *_ = make_chain()
