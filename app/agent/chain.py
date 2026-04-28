@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator
 from datetime import date, datetime
 
@@ -62,13 +63,42 @@ class AlmaChain:
         self._sessions = session_store
         self._cache = cache
 
-    async def stream(
+    async def stream_events(
         self, user_id: str, message: str, image_b64: str | None = None, language: str = "es"
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[dict, None]:
+        """Stream a typed-event sequence describing the full pipeline.
+
+        Event shape: ``{"type": "<name>", ...payload}``. Event types:
+
+        - ``agent_start``       — first event, includes language and image flag.
+        - ``guard_blocked``     — injection guard tripped; chain aborts.
+        - ``cache_hit``         — semantic cache hit; chain returns cached.
+        - ``memory_retrieved``  — pgvector search done; metadata only (no chunks).
+        - ``model_routed``      — selected model + max_tokens.
+        - ``response_chunk``    — each token from the LLM stream (legacy ``stream()`` filters these).
+        - ``agent_done``        — final, with ``stop_reason`` and latency totals.
+
+        The ``response_chunk`` events carry the user-facing token text in
+        ``content``. All other events carry pipeline observability metadata
+        and never leak raw memory contents into the SSE channel.
+        """
+        t_start = time.monotonic()
+        yield {
+            "type": "agent_start",
+            "language": language,
+            "has_image": image_b64 is not None,
+        }
+
         blocked, pattern = is_injection(message)
         if blocked:
             logger.warning("Injection attempt from user %s: pattern=%r", user_id, pattern)
-            yield safe_response(language)
+            yield {"type": "guard_blocked", "pattern": pattern}
+            yield {"type": "response_chunk", "content": safe_response(language)}
+            yield {
+                "type": "agent_done",
+                "stop_reason": "guard",
+                "latency_ms": int((time.monotonic() - t_start) * 1000),
+            }
             return
 
         session = await self._sessions.get(user_id)
@@ -78,26 +108,41 @@ class AlmaChain:
             cached = await self._cache.get(message)
             if cached is not None:
                 logger.debug("Semantic cache hit for user %s", user_id)
-                yield cached
+                yield {"type": "cache_hit"}
+                yield {"type": "response_chunk", "content": cached}
+                yield {
+                    "type": "agent_done",
+                    "stop_reason": "cache",
+                    "latency_ms": int((time.monotonic() - t_start) * 1000),
+                }
                 return
 
         context = await self._mcp.build_context(user_id)
 
         # Augment context with semantically relevant memories for this message
         relevant = await self._mcp.search_memories(user_id, message, k=_SEARCH_K)
-        if relevant:
+        relevant_above = [r for r in relevant if r.get("score", 0) >= _SEARCH_SCORE_MIN]
+        if relevant_above:
             header = "### Relevant memories" if language == "en" else "### Recuerdos relevantes"
-            snippets = [
-                f"- [{r['layer']}] {r['content']}"
-                for r in relevant
-                if r.get("score", 0) >= _SEARCH_SCORE_MIN
-            ]
-            if snippets:
-                context += f"\n\n{header}\n" + "\n".join(snippets)
+            snippets = [f"- [{r['layer']}] {r['content']}" for r in relevant_above]
+            context += f"\n\n{header}\n" + "\n".join(snippets)
+
+        yield {
+            "type": "memory_retrieved",
+            "count": len(relevant_above),
+            "layers": sorted({r.get("layer") for r in relevant_above if r.get("layer")}),
+            "top_score": max((float(r.get("score", 0.0)) for r in relevant_above), default=0.0),
+        }
 
         model_cfg = route_model(session.state, message, bool(image_b64))
-        system_prompt = build_system_prompt(context, language)
+        yield {
+            "type": "model_routed",
+            "model": model_cfg.model,
+            "max_tokens": model_cfg.max_tokens,
+            "session_state": session.state,
+        }
 
+        system_prompt = build_system_prompt(context, language)
         llm = make_llm(model_cfg.model, model_cfg.max_tokens)
 
         history_messages = [
@@ -110,6 +155,7 @@ class AlmaChain:
         messages = [SystemMessage(content=system_prompt)] + history_messages + [current_human]
 
         full_response_chunks: list[str] = []
+        chunk_count = 0
 
         async for chunk in llm.astream(messages):
             text = chunk.content
@@ -118,14 +164,36 @@ class AlmaChain:
                 text = "".join(block.get("text", "") for block in text if isinstance(block, dict))
             if text:
                 full_response_chunks.append(text)
-                yield text
+                chunk_count += 1
+                yield {"type": "response_chunk", "content": text}
 
         full_response = "".join(full_response_chunks)
+        latency_ms = int((time.monotonic() - t_start) * 1000)
+        yield {
+            "type": "agent_done",
+            "stop_reason": "end_turn",
+            "chunks": chunk_count,
+            "response_chars": len(full_response),
+            "latency_ms": latency_ms,
+        }
 
         # Post-response work runs in background so the stream closes immediately
         asyncio.create_task(
             self._post_response(user_id, message, full_response, session, image_b64)
         )
+
+    async def stream(
+        self, user_id: str, message: str, image_b64: str | None = None, language: str = "es"
+    ) -> AsyncGenerator[str, None]:
+        """Legacy string-only stream API.
+
+        Kept stable for existing callers and tests. Wraps ``stream_events()``
+        and yields only the user-facing response text — pipeline observability
+        events are dropped here. New consumers should use ``stream_events()``.
+        """
+        async for event in self.stream_events(user_id, message, image_b64, language):
+            if event["type"] == "response_chunk":
+                yield event["content"]
 
     async def _post_response(
         self,

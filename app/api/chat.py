@@ -1,3 +1,23 @@
+"""Chat endpoint — SSE bridge between AlmaChain and the browser.
+
+Emits two kinds of SSE events on the same stream:
+
+- **Unnamed events** (``data: <token>``): the response token stream. The
+  existing browser client consumes these in ``EventSource.onmessage`` and
+  appends them to the visible chat. This contract is preserved for backward
+  compatibility — adding the trace panel must not break the chat.
+- **Named events** (``event: <type>\\ndata: <json>``): pipeline observability
+  for the agent-trace panel. New clients add ``addEventListener('agent_start',
+  ...)``, ``addEventListener('memory_retrieved', ...)``, etc. Old clients that
+  only listen to ``onmessage`` ignore them silently.
+
+The payload of named events never includes raw memory chunks or the user's
+message text — only metadata (counts, scores, layers, latency, model name).
+"""
+from __future__ import annotations
+
+import json
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -17,7 +37,16 @@ async def chat(req: ChatRequest, request: Request):
     alma_chain = request.app.state.alma_chain
 
     async def generate():
-        async for chunk in alma_chain.stream(req.user_id, req.message, req.image_base64, req.language):
-            yield {"data": chunk}
+        async for event in alma_chain.stream_events(
+            req.user_id, req.message, req.image_base64, req.language
+        ):
+            event_type = event.get("type")
+            if event_type == "response_chunk":
+                # Backward-compatible token stream — onmessage handler appends these
+                yield {"data": event.get("content", "")}
+            else:
+                # Named event for the agent trace panel — addEventListener consumes these
+                payload = {k: v for k, v in event.items() if k != "type"}
+                yield {"event": event_type, "data": json.dumps(payload, default=str)}
 
     return EventSourceResponse(generate())
