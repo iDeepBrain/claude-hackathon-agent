@@ -27,6 +27,13 @@ def make_chain(
         return_value={"score": 0.0, "level": "low", "matched_keywords": []}
     )
     mcp.upsert_memory = AsyncMock()
+    # get_memory is queried in parallel with the LLM stream to render the
+    # weekly mood timeline. Default empty so the render_session_summary event
+    # is suppressed (frontend renders nothing). Tests that need the event
+    # override this on the returned mcp mock.
+    mcp.get_memory = AsyncMock(
+        return_value={"mood_history": [], "mentioned_events": [], "habits": [], "interaction_prefs": []}
+    )
 
     session_store = MagicMock()
     session_store.get = AsyncMock(return_value=Session(state="chat", language="es"))
@@ -554,3 +561,135 @@ async def test_stream_events_response_chunks_match_legacy_stream_output():
 
     chunk_events = [e for e in events if e["type"] == "response_chunk"]
     assert [e["content"] for e in chunk_events] == ["hello", " world"]
+
+
+# ── render_session_summary: weekly mood timeline event ────────────────────────
+
+
+async def test_render_session_summary_emitted_with_production_schema():
+    """When mood_history has >= 3 entries (production schema with mood_score
+    and entry_key), the event fires before agent_done with parsed week data."""
+    chain, mcp, *_ = make_chain()
+    mcp.get_memory = AsyncMock(return_value={
+        "mood_history": [
+            {"entry_key": "mood_2026-04-22", "mood_score": 7.0},
+            {"entry_key": "mood_2026-04-23", "mood_score": 5.5},
+            {"entry_key": "mood_2026-04-24", "mood_score": 6.0},
+        ],
+        "mentioned_events": [], "habits": [], "interaction_prefs": [],
+    })
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+
+    summaries = [e for e in events if e["type"] == "render_session_summary"]
+    assert len(summaries) == 1
+    week = summaries[0]["week"]
+    assert len(week) == 3
+    assert week[0]["date"] == "2026-04-22"
+    assert week[0]["score"] == 7.0
+    # render_session_summary must come BEFORE agent_done (so client renders
+    # the card while the response is still settling, not after stream close)
+    types = [e["type"] for e in events]
+    assert types.index("render_session_summary") < types.index("agent_done")
+
+
+async def test_render_session_summary_emitted_with_seed_schema():
+    """The reset-demo seed uses a different schema (date + intensity). Parser
+    must tolerate both without losing entries."""
+    chain, mcp, *_ = make_chain()
+    mcp.get_memory = AsyncMock(return_value={
+        "mood_history": [
+            {"date": "2026-04-22", "intensity": 5, "context": "tristeza_baja"},
+            {"date": "2026-04-23", "intensity": 6, "context": "ansiedad_moderada"},
+            {"date": "2026-04-24", "intensity": 7, "context": "no durmió bien"},
+        ],
+        "mentioned_events": [], "habits": [], "interaction_prefs": [],
+    })
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+
+    summaries = [e for e in events if e["type"] == "render_session_summary"]
+    assert len(summaries) == 1
+    week = summaries[0]["week"]
+    assert len(week) == 3
+    assert week[0]["date"] == "2026-04-22"
+    assert week[0]["score"] == 5.0
+    assert "tristeza" in week[0]["context"]
+
+
+async def test_render_session_summary_skipped_when_too_few_entries():
+    """Below the threshold (default 3 entries), event is suppressed — empty
+    timelines aren't worth a card."""
+    chain, mcp, *_ = make_chain()
+    mcp.get_memory = AsyncMock(return_value={
+        "mood_history": [{"entry_key": "mood_2026-04-22", "mood_score": 7.0}],
+        "mentioned_events": [], "habits": [], "interaction_prefs": [],
+    })
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+
+    summaries = [e for e in events if e["type"] == "render_session_summary"]
+    assert summaries == []
+
+
+async def test_render_session_summary_skipped_on_cache_hit():
+    """Cache hit path returns early — no mood query, no render event."""
+    chain, mcp, *_ = make_chain(cached_response="cacheado")
+    mcp.get_memory = AsyncMock(return_value={
+        "mood_history": [{"entry_key": "mood_2026-04-22", "mood_score": 7.0}] * 5,
+        "mentioned_events": [], "habits": [], "interaction_prefs": [],
+    })
+    events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+    summaries = [e for e in events if e["type"] == "render_session_summary"]
+    assert summaries == []
+    # get_memory is never even called on cache hit (saves an MCP round-trip)
+    mcp.get_memory.assert_not_called()
+
+
+async def test_render_session_summary_takes_last_7_days_only():
+    """If mood_history has > 7 entries, only the most recent 7 are emitted."""
+    chain, mcp, *_ = make_chain()
+    mcp.get_memory = AsyncMock(return_value={
+        "mood_history": [
+            {"entry_key": f"mood_2026-04-{day:02d}", "mood_score": float(day)}
+            for day in range(10, 25)  # 15 entries
+        ],
+        "mentioned_events": [], "habits": [], "interaction_prefs": [],
+    })
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+
+    summaries = [e for e in events if e["type"] == "render_session_summary"]
+    week = summaries[0]["week"]
+    assert len(week) == 7
+    # The MOST RECENT 7 entries
+    assert week[0]["date"] == "2026-04-18"
+    assert week[-1]["date"] == "2026-04-24"

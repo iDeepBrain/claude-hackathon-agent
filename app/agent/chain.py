@@ -45,6 +45,48 @@ _EVENT_PHRASES = [
 
 _CRISIS_THRESHOLD = 0.4
 
+_MOOD_SUMMARY_MIN_ENTRIES = 3  # require at least N mood entries to render the timeline
+_MOOD_SUMMARY_DAYS = 7
+
+
+def _extract_week_summary(mood_history: list) -> list[dict]:
+    """Extract the last 7 days of mood entries in a render-friendly shape.
+
+    Tolerates both the production schema (``mood_score`` + ``entry_key``
+    formatted ``mood_YYYY-MM-DD``) and the seed schema (``date`` + ``intensity``).
+    Tolerates wrapper shapes where MCP returns ``{content, ts, ...}``.
+    """
+    week: list[dict] = []
+    for entry in mood_history[-_MOOD_SUMMARY_DAYS:]:
+        # Memory MCP may wrap records as {"content": {...}, ...}
+        record = entry.get("content", entry) if isinstance(entry, dict) else {}
+        if not isinstance(record, dict):
+            continue
+
+        # Date: either explicit field or parsed from entry_key like "mood_2026-04-22"
+        d = record.get("date")
+        if not d and isinstance(record.get("entry_key"), str):
+            d = record["entry_key"].replace("mood_", "") or None
+
+        # Score: 0-10 in production (mood_score) or 1-10 in seed (intensity)
+        score = record.get("mood_score")
+        if score is None:
+            score = record.get("intensity")
+        if score is None:
+            continue
+
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            continue
+
+        week.append({
+            "date": d or "",
+            "score": round(score, 1),
+            "context": str(record.get("context") or record.get("mood") or ""),
+        })
+    return week
+
 
 def _build_human_content(text: str, image_b64: str | None) -> list | str:
     if image_b64 is None:
@@ -142,6 +184,10 @@ class AlmaChain:
             "session_state": session.state,
         }
 
+        # Kick off mood-summary fetch in parallel with the LLM stream so the
+        # render_session_summary card has data ready before tokens finish.
+        mood_task = asyncio.create_task(self._mcp.get_memory(user_id))
+
         system_prompt = build_system_prompt(context, language)
         llm = make_llm(model_cfg.model, model_cfg.max_tokens)
 
@@ -169,6 +215,24 @@ class AlmaChain:
 
         full_response = "".join(full_response_chunks)
         latency_ms = int((time.monotonic() - t_start) * 1000)
+
+        # Render a small weekly mood timeline if we have enough history.
+        # The fetch was kicked off in parallel with the LLM stream above, so
+        # the await is typically a no-op. Bound the wait so a slow MCP call
+        # never blocks stream completion past a fraction of a second.
+        try:
+            mem = await asyncio.wait_for(mood_task, timeout=0.5)
+            mood_history = mem.get("mood_history", []) if isinstance(mem, dict) else []
+            if len(mood_history) >= _MOOD_SUMMARY_MIN_ENTRIES:
+                week = _extract_week_summary(mood_history)
+                if week:
+                    yield {
+                        "type": "render_session_summary",
+                        "week": week,
+                    }
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("Skipping render_session_summary: %s", exc)
+
         yield {
             "type": "agent_done",
             "stop_reason": "end_turn",
