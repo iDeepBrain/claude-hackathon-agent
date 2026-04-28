@@ -801,6 +801,89 @@ async def test_render_memory_card_caps_long_chunks():
     assert cards[0]["chunk"].endswith("…")
 
 
+async def test_render_crisis_alert_emitted_when_score_above_threshold():
+    """When the deterministic detector returns score >= 0.1, the alert fires
+    with the full state {score, level, gates} so the UI can SHOW the safety
+    layer reasoning."""
+    chain, mcp, *_ = make_chain()
+    mcp.evaluate_crisis_risk = AsyncMock(return_value={
+        "score": 0.55, "level": "moderate", "matched_keywords": ["no puedo más"]
+    })
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "no puedo más", language="es"))
+
+    alerts = [e for e in events if e["type"] == "render_crisis_alert"]
+    assert len(alerts) == 1
+    a = alerts[0]
+    assert a["score"] == pytest.approx(0.55)
+    assert a["level"] == "moderate"
+    assert a["gates"] == {"proactive_suppressed": False}  # 0.55 < 0.6
+    # Alert event MUST come BEFORE agent_done (so the UI can react before
+    # the stream closes — frontend can't subscribe to events after close)
+    types = [e["type"] for e in events]
+    assert types.index("render_crisis_alert") < types.index("agent_done")
+
+
+async def test_render_crisis_alert_proactive_gate_active_above_0_6():
+    """Above 0.6 the scheduler suppresses outbound check-ins. The alert
+    payload must surface this so the UI can communicate "Alma is staying
+    quiet on purpose" instead of looking broken."""
+    chain, mcp, *_ = make_chain()
+    mcp.evaluate_crisis_risk = AsyncMock(return_value={
+        "score": 0.78, "level": "high", "matched_keywords": []
+    })
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="estoy aquí")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "x", language="es"))
+
+    alerts = [e for e in events if e["type"] == "render_crisis_alert"]
+    assert len(alerts) == 1
+    assert alerts[0]["score"] == pytest.approx(0.78)
+    assert alerts[0]["level"] == "high"
+    assert alerts[0]["gates"]["proactive_suppressed"] is True
+
+
+async def test_render_crisis_alert_skipped_on_zero_score():
+    """The default 0.0 baseline shouldn't pollute the UI with an alert."""
+    chain, *_ = make_chain()  # default mock returns score 0.0
+    with patch("app.agent.chain.make_llm") as MockLLM:
+        mock_instance = MagicMock()
+        MockLLM.return_value = mock_instance
+
+        async def fake_astream(messages):
+            yield MagicMock(content="ok")
+
+        mock_instance.astream = fake_astream
+        events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+
+    alerts = [e for e in events if e["type"] == "render_crisis_alert"]
+    assert alerts == []
+
+
+async def test_render_crisis_alert_skipped_on_cache_hit():
+    """Cache hit returns early — no crisis check ran, no alert. (The
+    background _post_response in a real cache hit would still update
+    Redis crisis state for the proactive scheduler.)"""
+    chain, mcp, *_ = make_chain(cached_response="hola de nuevo")
+    mcp.evaluate_crisis_risk = AsyncMock(return_value={"score": 0.9, "level": "critical"})
+    events = await _collect_events(chain.stream_events("u1", "hola", language="es"))
+    alerts = [e for e in events if e["type"] == "render_crisis_alert"]
+    assert alerts == []
+
+
 async def test_render_session_summary_takes_last_7_days_only():
     """If mood_history has > 7 entries, only the most recent 7 are emitted."""
     chain, mcp, *_ = make_chain()

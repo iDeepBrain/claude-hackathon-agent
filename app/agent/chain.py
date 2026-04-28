@@ -50,6 +50,17 @@ _MOOD_SUMMARY_DAYS = 7
 _MEMORY_CARD_MIN_SCORE = 0.6  # below this, the recall isn't confident enough to surface
 _MEMORY_CARD_MAX_CHARS = 280  # cap chunk length so a single big record doesn't dominate UI
 
+# Crisis alert tiers (calibrated against the MCP deterministic detector):
+#   >= 0.1 = single MEDIUM keyword ("muy triste", "deprimido", "agotado"...)
+#           — surface the alert so the user/reviewer sees the safety layer
+#           is reasoning about this turn, not pretending nothing happened
+#   >= 0.2 = two MEDIUM matches OR strong combinations
+#   >= 0.4 = HARD keyword ("no quiero vivir", "kill myself"...) — chain ALSO
+#           transitions session.state to "crisis" via the existing _post_response
+#   >= 0.6 = proactive Redis gate active — Cloud Scheduler suppresses outbound
+_CRISIS_ALERT_MIN_SCORE = 0.1
+_CRISIS_PROACTIVE_GATE = 0.6
+
 
 def _format_memory_chunk(content: object) -> str:
     """Format a memory record as a compact human-readable single line.
@@ -131,6 +142,39 @@ def _build_human_content(text: str, image_b64: str | None) -> list | str:
 def _has_event_mention(message: str) -> bool:
     lower = message.lower()
     return any(phrase in lower for phrase in _EVENT_PHRASES)
+
+
+def _extract_event_snippet(message: str) -> str | None:
+    """Extract a clean event description from a free-text user message.
+
+    Replaces the previous `description=message[:120]` auto-upsert pattern
+    which stored the user's raw message verbatim — that polluted the
+    themes panel with timestamps and full sentences. This extracts the
+    matched event phrase with a small context window and strips numeric
+    timestamps that are clearly testing artifacts (8+ contiguous digits).
+
+    Returns ``None`` if no event phrase matches, otherwise a string
+    capped at 80 chars with whitespace normalized.
+    """
+    import re
+
+    lower = message.lower()
+    # Find the earliest matched phrase
+    earliest: tuple[str, int] | None = None
+    for phrase in _EVENT_PHRASES:
+        idx = lower.find(phrase)
+        if idx >= 0 and (earliest is None or idx < earliest[1]):
+            earliest = (phrase, idx)
+    if not earliest:
+        return None
+    phrase, idx = earliest
+    # Start at the matched phrase (don't take preamble — risks mid-word cut).
+    end = min(len(message), idx + len(phrase) + 50)
+    snippet = message[idx:end]
+    # Strip long digit sequences (timestamps, IDs from testing pollution)
+    snippet = re.sub(r"\b\d{8,}\b", "", snippet)
+    snippet = re.sub(r"\s+", " ", snippet).strip()
+    return snippet[:80] if snippet else None
 
 
 class AlmaChain:
@@ -236,9 +280,12 @@ class AlmaChain:
             "session_state": session.state,
         }
 
-        # Kick off mood-summary fetch in parallel with the LLM stream so the
-        # render_session_summary card has data ready before tokens finish.
+        # Kick off mood-summary AND crisis-evaluation in parallel with the
+        # LLM stream so the post-stream renders have data ready before tokens
+        # finish. Both tasks are bounded by short timeouts on await so neither
+        # ever blocks stream completion past a fraction of a second.
         mood_task = asyncio.create_task(self._mcp.get_memory(user_id))
+        crisis_task = asyncio.create_task(self._mcp.evaluate_crisis_risk(user_id, message))
 
         system_prompt = build_system_prompt(context, language)
         llm = make_llm(model_cfg.model, model_cfg.max_tokens)
@@ -284,6 +331,27 @@ class AlmaChain:
                     }
         except (asyncio.TimeoutError, Exception) as exc:
             logger.debug("Skipping render_session_summary: %s", exc)
+
+        # Surface the crisis evaluation as a visible artifact so the user
+        # (and demo reviewers) SEE that the safety layer is reasoning about
+        # this turn — not opaque magic. Only fired above MIN_SCORE so the
+        # baseline "all good" doesn't burden the UI. Includes the proactive
+        # gate state so it's clear what the system is DOING with the score.
+        try:
+            crisis = await asyncio.wait_for(crisis_task, timeout=0.5)
+            score = float(crisis.get("score", 0.0)) if isinstance(crisis, dict) else 0.0
+            if score >= _CRISIS_ALERT_MIN_SCORE:
+                yield {
+                    "type": "render_crisis_alert",
+                    "score": round(score, 2),
+                    "level": str(crisis.get("level", "low")) if isinstance(crisis, dict) else "low",
+                    "gates": {
+                        # gate #1 — chain-side, decided by score alone
+                        "proactive_suppressed": score >= _CRISIS_PROACTIVE_GATE,
+                    },
+                }
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("Skipping render_crisis_alert: %s", exc)
 
         yield {
             "type": "agent_done",
@@ -367,14 +435,17 @@ class AlmaChain:
             },
         )
 
-        # Memory upsert for mentioned events/context
-        if _has_event_mention(message):
+        # Memory upsert for mentioned events: store ONLY a clean, short
+        # event field — not the raw user message. Previously this stored
+        # description=message[:120] AND the full message AND a response
+        # preview, which polluted the themes panel with timestamps and
+        # full sentences. The cleaner format renders well in the panel
+        # and the render_memory_card still gets richer context via the
+        # surrounding response.
+        snippet = _extract_event_snippet(message)
+        if snippet:
             await self._mcp.upsert_memory(
                 user_id,
                 "mentioned_events",
-                {
-                    "description": message[:120],
-                    "message": message,
-                    "response_preview": response[:200],
-                },
+                {"event": snippet},
             )
