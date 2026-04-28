@@ -45,7 +45,12 @@ _EVENT_PHRASES = [
 
 _CRISIS_THRESHOLD = 0.4
 
-_MOOD_SUMMARY_MIN_ENTRIES = 3  # require at least N mood entries to render the timeline
+# mood_history upserts ONE entry per day (key "mood_<YYYY-MM-DD>"), so a
+# threshold of 3 means the timeline only appears on day 3 of usage. For
+# fresh users that's a poor first impression. Lower to 1 — the panel
+# fills immediately, even if only with today's bar; subsequent days
+# extend it left → right naturally.
+_MOOD_SUMMARY_MIN_ENTRIES = 1
 _MOOD_SUMMARY_DAYS = 7
 _MEMORY_CARD_MIN_SCORE = 0.6  # below this, the recall isn't confident enough to surface
 _MEMORY_CARD_MAX_CHARS = 280  # cap chunk length so a single big record doesn't dominate UI
