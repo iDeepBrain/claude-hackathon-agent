@@ -39,8 +39,15 @@ steps:
       - '--min-instances=1'
       - '--max-instances=3'
       - '--concurrency=80'
+      # SSE conversational streams + parallel mood/crisis tasks can exceed
+      # the default 5-minute timeout; bump to 10 minutes so live demos with
+      # cold-starts don't get cut mid-response.
+      - '--timeout=600'
       - '--set-env-vars=^|^ENVIRONMENT=production|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92'
-      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest'
+      # DEMO_SEED_TOKEN gates POST /api/v1/demo/seed (used to repopulate the
+      # canonical demo persona "Mateo" on alma-bot.com). Set the secret
+      # value in GCP Secret Manager BEFORE the first deploy that needs it.
+      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest,DEMO_SEED_TOKEN=ALMA_DEMO_SEED_TOKEN:latest'
     waitFor: ['push']
 
 substitutions:
