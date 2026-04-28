@@ -10,7 +10,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.agent.chain import AlmaChain
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
+from app.api.config import router as config_router
 from app.api.cron import router as cron_router
 from app.api.demo import router as demo_router
 from app.api.memory import router as memory_router
@@ -86,6 +88,8 @@ app.include_router(chat_router, prefix="/api/v1")
 app.include_router(memory_router, prefix="/api/v1")
 app.include_router(proactivity_router, prefix="/api/v1")
 app.include_router(demo_router, prefix="/api/v1")  # POST /api/v1/demo/seed
+app.include_router(auth_router, prefix="/api/v1")  # POST /api/v1/auth/google
+app.include_router(config_router, prefix="/api/v1")  # GET /api/v1/config (public client config)
 app.include_router(cron_router)  # Cloud Scheduler: /cron/proactive/{slot}
 
 

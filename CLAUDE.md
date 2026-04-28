@@ -31,6 +31,8 @@ POST /api/v1/chat                  → SSE stream de respuesta (AlmaChain)
 GET  /api/v1/memory/{user_id}      → 4 capas de memoria del usuario (JSON)
 POST /api/v1/trigger               → Disparar mensaje proactivo manual (dev)
 POST /api/v1/demo/seed             → Re-seed demo user "Mateo" con memoria 7-day (X-Demo-Token requerido)
+POST /api/v1/auth/google           → Verifica id_token de Google Identity Services, retorna user_id "google_<sub>"
+GET  /api/v1/config                → Public client config (Google OAuth Client ID si está configurado)
 POST /cron/proactive/{slot}        → Cloud Scheduler endpoint (X-Cloud-Scheduler-Token)
 ```
 
@@ -100,6 +102,11 @@ PROACTIVE_SILENCE_WINDOW_H=2
 
 # Demo seed (opcional — solo activar si querés exponer /api/v1/demo/seed)
 DEMO_SEED_TOKEN=<token compartido con quien dispare el reset>
+
+# Google OAuth (opcional — sin esto, el CTA "Continuar con Google" no aparece en el frontend)
+# Crear en Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client (type Web)
+# Authorized JavaScript origins: https://alma-bot.com, http://localhost:3000
+GOOGLE_OAUTH_CLIENT_ID=<your-id>.apps.googleusercontent.com
 
 # Cloud Scheduler auth (producción)
 CRON_TOKEN=<token compartido con Cloud Scheduler>
