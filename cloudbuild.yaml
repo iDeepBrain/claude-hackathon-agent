@@ -53,7 +53,13 @@ steps:
       # not local). TELEGRAM_BOT_USERNAME is needed for the WS-D.4
       # Telegram link bridge — left as a substitution so a different
       # bot can be used per env without code changes.
-      - '--set-env-vars=^|^ENVIRONMENT=production|ALMA_ENV=prod|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92|GOOGLE_OAUTH_CLIENT_ID=${_GOOGLE_OAUTH_CLIENT_ID}|TELEGRAM_BOT_USERNAME=${_TELEGRAM_BOT_USERNAME}'
+      # LLM chain configured per user preference (post WS-H.6 incident):
+      # primary stays Anthropic (Claude is the hackathon target); secondary
+      # is Gemini with flash-lite as HIGH (fastest + cheapest) and flash as
+      # LOW (richer fallback). Order matters — discover_provider() probes
+      # PRIMARY_HIGH → PRIMARY_LOW → SECONDARY_HIGH → SECONDARY_LOW and
+      # pins the first that pings successfully.
+      - '--set-env-vars=^|^ENVIRONMENT=production|ALMA_ENV=prod|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92|GOOGLE_OAUTH_CLIENT_ID=${_GOOGLE_OAUTH_CLIENT_ID}|TELEGRAM_BOT_USERNAME=${_TELEGRAM_BOT_USERNAME}|LLM_PRIMARY_PROVIDER=anthropic|LLM_PRIMARY_MODEL_HIGH=claude-opus-4-7|LLM_PRIMARY_MODEL_LOW=claude-haiku-4-5-20251001|LLM_SECONDARY_PROVIDER=gemini|LLM_SECONDARY_MODEL_HIGH=gemini-2.5-flash-lite|LLM_SECONDARY_MODEL_LOW=gemini-2.5-flash|LLM_MAX_TOKENS_HIGH=4096|LLM_MAX_TOKENS_LOW=2048'
       # DEMO_SEED_TOKEN gates POST /api/v1/demo/seed. Re-add when the
       # ALMA_DEMO_SEED_TOKEN secret exists in Secret Manager:
       #   echo -n "$(openssl rand -base64 32)" | \
