@@ -112,3 +112,141 @@ async def test_refresher_loop_writes_state_periodically():
 
     assert app.state.llm_health["ok"] is True
     assert app.state.llm_health["provider"] == "anthropic"
+
+
+# ── /api/v1/ready tests ───────────────────────────────────────────────────────
+
+
+def _make_app_with_state(llm_health, redis_ping=None):
+    from app.api.health import health_router, ready_router
+    app = FastAPI()
+    app.include_router(health_router)
+    app.include_router(ready_router, prefix="/api/v1")
+    app.state.llm_info = {"provider": "anthropic", "model": "claude-opus-4-7",
+                          "preferred": "claude-opus-4-7", "fallback_reason": None}
+    app.state.llm_health = llm_health
+
+    redis_mock = MagicMock()
+    if redis_ping is None:
+        redis_mock.ping = AsyncMock(return_value=True)
+    else:
+        redis_mock.ping = redis_ping
+    app.state.scheduler_redis = redis_mock
+
+    return app
+
+
+@pytest.mark.asyncio
+async def test_ready_all_ok_returns_200_status_ok():
+    app = _make_app_with_state(
+        llm_health={"ok": True, "provider": "anthropic",
+                    "model": "claude-opus-4-7", "error": None,
+                    "last_probed_at": time.time() - 5},
+    )
+    with patch("app.api.health._probe_mcp", AsyncMock(return_value=(True, 47, None))):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/ready")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["checks"]["llm"]["ok"] is True
+    assert body["checks"]["llm"]["provider"] == "anthropic"
+    assert body["checks"]["llm"]["stale_s"] >= 4
+    assert body["checks"]["redis"]["ok"] is True
+    assert body["checks"]["mcp"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_ready_redis_down_returns_200_status_degraded():
+    app = _make_app_with_state(
+        llm_health={"ok": True, "provider": "anthropic", "model": "claude-opus-4-7",
+                    "error": None, "last_probed_at": time.time()},
+        redis_ping=AsyncMock(side_effect=asyncio.TimeoutError()),
+    )
+    with patch("app.api.health._probe_mcp", AsyncMock(return_value=(True, 30, None))):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/ready")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["redis"]["ok"] is False
+    assert "TimeoutError" in body["checks"]["redis"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_ready_mcp_down_returns_200_status_degraded():
+    app = _make_app_with_state(
+        llm_health={"ok": True, "provider": "anthropic", "model": "claude-opus-4-7",
+                    "error": None, "last_probed_at": time.time()},
+    )
+    with patch("app.api.health._probe_mcp",
+               AsyncMock(return_value=(False, 1000, "ConnectError: connection refused"))):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/ready")
+    assert r.status_code == 200
+    assert r.json()["status"] == "degraded"
+    assert r.json()["checks"]["mcp"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_ready_llm_down_returns_503_status_down():
+    app = _make_app_with_state(
+        llm_health={"ok": False, "provider": None, "model": None,
+                    "error": "all providers exhausted", "last_probed_at": time.time()},
+    )
+    with patch("app.api.health._probe_mcp", AsyncMock(return_value=(True, 30, None))):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/ready")
+    assert r.status_code == 503
+    assert r.json()["status"] == "down"
+    assert r.json()["checks"]["llm"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_ready_llm_not_probed_yet_returns_503():
+    """Cold-start fail-closed: if llm_health is missing, /ready returns 503."""
+    from app.api.health import health_router, ready_router
+    app = FastAPI()
+    app.include_router(health_router)
+    app.include_router(ready_router, prefix="/api/v1")
+    redis_mock = MagicMock()
+    redis_mock.ping = AsyncMock(return_value=True)
+    app.state.scheduler_redis = redis_mock
+    with patch("app.api.health._probe_mcp", AsyncMock(return_value=(True, 30, None))):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/ready")
+    assert r.status_code == 503
+    assert r.json()["checks"]["llm"]["error"] == "not yet probed"
+
+
+@pytest.mark.asyncio
+async def test_ready_runs_probes_in_parallel():
+    async def slow_ping():
+        await asyncio.sleep(0.4)
+        return True
+
+    async def slow_mcp():
+        await asyncio.sleep(0.4)
+        return True, 400, None
+
+    redis_mock = MagicMock()
+    redis_mock.ping = slow_ping
+
+    from app.api.health import health_router, ready_router
+    app = FastAPI()
+    app.include_router(health_router)
+    app.include_router(ready_router, prefix="/api/v1")
+    app.state.llm_info = {"provider": "anthropic", "model": "claude-opus-4-7",
+                          "preferred": "claude-opus-4-7", "fallback_reason": None}
+    app.state.llm_health = {"ok": True, "provider": "anthropic", "model": "claude-opus-4-7",
+                            "error": None, "last_probed_at": time.time()}
+    app.state.scheduler_redis = redis_mock
+
+    with patch("app.api.health._probe_mcp", new=slow_mcp):
+        t0 = time.monotonic()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/ready")
+        elapsed = time.monotonic() - t0
+
+    assert r.status_code == 200
+    assert elapsed < 0.7, f"probes ran sequentially: {elapsed:.2f}s"
