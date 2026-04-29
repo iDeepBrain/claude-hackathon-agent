@@ -17,6 +17,7 @@ from app.api.cron import router as cron_router
 from app.api.demo import router as demo_router
 from app.api.memory import router as memory_router
 from app.api.proactivity import router as proactivity_router
+from app.api.telegram_link import router as telegram_link_router
 from app.api.users import router as users_router
 from app.cache.semantic import SemanticCache
 from app.cache.session import RedisSession
@@ -92,6 +93,7 @@ app.include_router(demo_router, prefix="/api/v1")  # POST /api/v1/demo/seed
 app.include_router(auth_router, prefix="/api/v1")  # POST /api/v1/auth/google
 app.include_router(config_router, prefix="/api/v1")  # GET /api/v1/config (public client config)
 app.include_router(users_router, prefix="/api/v1")  # POST /api/v1/users/profile (onboarding)
+app.include_router(telegram_link_router, prefix="/api/v1")  # POST /api/v1/users/telegram-link/token
 app.include_router(cron_router)  # Cloud Scheduler: /cron/proactive/{slot}
 
 
