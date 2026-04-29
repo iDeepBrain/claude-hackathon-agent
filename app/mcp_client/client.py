@@ -100,3 +100,19 @@ class MCPClient:
         if result is None:
             return {"mood_history": [], "mentioned_events": [], "habits": [], "interaction_prefs": []}
         return result if isinstance(result, dict) else {"mood_history": [], "mentioned_events": [], "habits": [], "interaction_prefs": []}
+
+    async def link_anonymous_to_account(
+        self, anon_uuid: str, google_sub: str, action: str
+    ) -> dict:
+        """WS-D.2 — call MCP tool to link or wipe anonymous identity.
+
+        action must be 'keep' or 'reset'. Returns a dict with at least
+        {ok: bool, action: str, merged_layers: int}.
+        """
+        result = await self._invoke(
+            "link_anonymous_to_account_tool",
+            {"anon_uuid": anon_uuid, "google_sub": google_sub, "action": action},
+        )
+        if result is None:
+            return {"ok": False, "error": "no result from MCP"}
+        return result if isinstance(result, dict) else {"ok": False, "error": "bad shape"}
