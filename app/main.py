@@ -15,6 +15,7 @@ from app.api.chat import router as chat_router
 from app.api.config import router as config_router
 from app.api.cron import router as cron_router
 from app.api.demo import router as demo_router
+from app.api.health import health_router, ready_router
 from app.api.memory import router as memory_router
 from app.api.proactivity import router as proactivity_router
 from app.api.telegram_link import router as telegram_link_router
@@ -103,18 +104,8 @@ app.include_router(config_router, prefix="/api/v1")  # GET /api/v1/config (publi
 app.include_router(users_router, prefix="/api/v1")  # POST /api/v1/users/profile (onboarding)
 app.include_router(telegram_link_router, prefix="/api/v1")  # POST /api/v1/users/telegram-link/token
 app.include_router(cron_router)  # Cloud Scheduler: /cron/proactive/{slot}
-
-
-@app.get("/health")
-async def health(request: Request):
-    info = getattr(request.app.state, "llm_info", {})
-    return {
-        "status": "ok",
-        "provider": info.get("provider", "unknown"),
-        "model": info.get("model"),
-        "preferred": info.get("preferred", "claude-opus-4-7"),
-        "fallback_reason": info.get("fallback_reason"),
-    }
+app.include_router(health_router)              # GET /health (shallow, liveness) — WS-H.4
+app.include_router(ready_router, prefix="/api/v1")  # GET /api/v1/ready (deep dep check) — WS-H.4
 
 
 @app.exception_handler(Exception)
