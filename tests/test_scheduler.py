@@ -44,12 +44,14 @@ async def test_send_proactive_sends_when_gates_pass():
     redis.set.assert_called_once()
 
 
-def test_create_scheduler_has_3_jobs():
+def test_create_scheduler_has_telegram_jobs_per_slot():
+    """Telegram path: one job per slot. Web push adds another set; that
+    set is asserted in test_scheduler_push.py."""
     redis = AsyncMock()
     scheduler = create_scheduler(redis)
-    assert len(scheduler.get_jobs()) == 3
     job_ids = {j.id for j in scheduler.get_jobs()}
-    assert job_ids == {"proactive_breakfast", "proactive_lunch", "proactive_dinner"}
+    for slot in ("breakfast", "lunch", "dinner"):
+        assert f"proactive_{slot}" in job_ids
 
 
 @pytest.mark.asyncio
