@@ -26,4 +26,12 @@ async def public_config() -> dict:
     google_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
     if google_id:
         cfg["google_oauth_client_id"] = google_id
+    # Telegram bot username (without the @) — used by the web frontend to
+    # build deep-links like https://t.me/<username>?start=<token> when
+    # the user picks "Telegram" as proactive channel. Public info, fine
+    # to expose. Fallback to env var so deployments can override; if
+    # neither is set the frontend hides the channel option.
+    tg_username = os.getenv("TELEGRAM_BOT_USERNAME", "").strip()
+    if tg_username:
+        cfg["telegram_bot_username"] = tg_username.lstrip("@")
     return cfg
