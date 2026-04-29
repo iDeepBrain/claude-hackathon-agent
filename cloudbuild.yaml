@@ -66,7 +66,11 @@ steps:
       #     gcloud secrets create ALMA_DEMO_SEED_TOKEN --data-file=-
       # Then append `,DEMO_SEED_TOKEN=ALMA_DEMO_SEED_TOKEN:latest` to the
       # --set-secrets list below. Until then, the seed endpoint stays 500.
-      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest'
+      # WS-D.3 — VAPID keys appended for Web Push (3 new env vars from
+      # the secrets created via secrets/sync.sh in claude-hackathon-infra).
+      # If left unset, the agent's /api/v1/config omits vapid_public_key
+      # and the frontend hides the push toggle (fail-closed by design).
+      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest,VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,VAPID_SUBJECT=VAPID_SUBJECT:latest'
     waitFor: ['push']
 
 substitutions:
