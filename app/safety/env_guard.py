@@ -26,9 +26,22 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _audit(msg: str) -> None:
+    """WS-H.5 — emit audit lines to stderr in addition to logger.info().
+
+    Cloud Run captures stderr unconditionally. The agent runs the guard
+    inside lifespan (after uvicorn configures logging), so logger.info()
+    works here today — but we mirror MCP's behavior to keep the two
+    parallel modules identical and to harden against future call sites
+    that might run before logging is set up."""
+    print(msg, file=sys.stderr, flush=True)
+    logger.info(msg)
 
 
 # Hosts considered safe ONLY for local development. Identical to the
@@ -147,7 +160,7 @@ def validate_all_or_raise(*pairs: tuple[str, str]) -> None:
         if pairs:
             validate_url_against_env(*pairs[0])
         return
-    logger.info("Env-guard: ALMA_ENV=%s", env)
+    _audit(f"Env-guard: ALMA_ENV={env}")
     for url_var, label in pairs:
         validate_url_against_env(url_var, label)
-        logger.info("Env-guard OK: %s host validated for env=%s", label, env)
+        _audit(f"Env-guard OK: {label} host validated for env={env}")

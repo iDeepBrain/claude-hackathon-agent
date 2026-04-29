@@ -126,3 +126,18 @@ def test_validate_all_or_raise_first_mismatch_wins(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@postgres:5432/db")
     with pytest.raises(EnvMismatchError, match="REDIS_URL"):
         validate_all_or_raise(("REDIS_URL", "redis"), ("DATABASE_URL", "postgres"))
+
+
+# ---------- WS-H.5 — stderr emission ----------
+
+
+def test_validate_all_or_raise_emits_to_stderr(monkeypatch, capsys):
+    """Audit lines MUST go to stderr directly on top of logger.info().
+    Cloud Run captures stderr unconditionally; logger.info() can be lost
+    if the call site runs before uvicorn attaches its handler."""
+    monkeypatch.setenv("ALMA_ENV", "local")
+    monkeypatch.setenv("REDIS_URL", "redis://redis:6379")
+    validate_all_or_raise(("REDIS_URL", "redis"))
+    captured = capsys.readouterr()
+    assert "Env-guard: ALMA_ENV=local" in captured.err
+    assert "Env-guard OK: redis" in captured.err
