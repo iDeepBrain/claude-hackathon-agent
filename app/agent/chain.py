@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncGenerator
 from datetime import date, datetime
@@ -97,6 +98,14 @@ def _format_memory_chunk(content: object) -> str:
         text = " · ".join(kept)
     else:
         text = str(content) if content is not None else ""
+    # Cycle 2 finding: long digit/decimal runs (JS Date.now() leaks like
+    # "1777413404695.0568372488704...") survived the prior 8+ digit
+    # regex when they had decimal points. Strip aggressively here so
+    # both the inline render_memory_card payload AND any other surface
+    # that re-renders this string sees a clean version.
+    text = re.sub(r"\b\d{6,}(?:[.,]\d+)?\b", "", text)
+    text = re.sub(r"\s+·\s*·\s+", " · ", text)  # collapse adjacent dot separators
+    text = re.sub(r"\s+", " ", text).strip(" ·")
     if len(text) > _MEMORY_CARD_MAX_CHARS:
         text = text[: _MEMORY_CARD_MAX_CHARS - 1] + "…"
     return text
@@ -164,8 +173,6 @@ def _extract_event_snippet(message: str) -> str | None:
     Returns ``None`` if no event phrase matches, otherwise a string
     capped at 80 chars with whitespace normalized.
     """
-    import re
-
     lower = message.lower()
     # Find the earliest matched phrase
     earliest: tuple[str, int] | None = None
