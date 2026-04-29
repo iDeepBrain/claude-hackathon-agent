@@ -48,6 +48,22 @@ async def lifespan(app: FastAPI):
     app.state.llm_info = llm_info
     logger.info("LLM elected at startup: %s / %s", llm_info.get("provider"), llm_info.get("model"))
 
+    # WS-H.4 — Seed llm_health with the boot-time discovery so /ready works
+    # before the refresher has had a chance to run.
+    import time as _time
+    app.state.llm_health = {
+        "ok": llm_info.get("provider") not in (None, "none"),
+        "provider": llm_info.get("provider"),
+        "model": llm_info.get("model"),
+        "error": llm_info.get("fallback_reason"),
+        "last_probed_at": _time.time(),
+    }
+
+    # Background refresher — keeps app.state.llm_health fresh every 60s.
+    from app.safety.llm_refresher import refresher_loop
+    llm_refresher_task = asyncio.create_task(refresher_loop(app, interval_s=60.0))
+    app.state.llm_refresher_task = llm_refresher_task
+
     redis_url = os.environ["REDIS_URL"]
     mcp_url = os.environ["MCP_URL"]
     session_ttl = int(os.getenv("SESSION_TTL", "86400"))
@@ -90,6 +106,12 @@ async def lifespan(app: FastAPI):
     yield
     if scheduler:
         scheduler.shutdown(wait=False)
+    # WS-H.4 — cancel the refresher cleanly on shutdown
+    llm_refresher_task.cancel()
+    try:
+        await llm_refresher_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Alma Agent shutting down")
 
 
