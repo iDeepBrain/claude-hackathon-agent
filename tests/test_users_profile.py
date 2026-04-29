@@ -1,21 +1,21 @@
-"""Tests for the user profile onboarding endpoint.
+"""Tests for the user profile / preferences endpoint.
 
-Mocks the MCP client (via ``app.state.mcp_client``) so the suite runs
-without a live MCP. Contract under test:
+Mocks the MCP client so the suite runs without a live MCP. Covers:
+
   · 400 if user_id is anonymous (UUID, not google_<sub> or tg_<id>).
-  · 422 if age_range is outside the allowed set (handled by Pydantic).
-  · 200 + three upserts on success (name, age_range, phone).
-  · 200 + two upserts when phone is omitted/empty (skip phone layer).
-  · Phone with too-few digits is silently dropped (no upsert), endpoint
-    still returns 200 — better than rejecting on an edge case the user
-    can't easily fix in the modal.
-  · Phone is normalized: non-digits stripped except the leading +,
-    last4 stored as-is from the digit-only suffix.
+  · 422 if age_range / proactive_channel are outside the allowed set.
+  · NEW (E.8) — feature opt-ins:
+      remember_consent (bool), proactive_channel ("none"|"push"|"telegram"|"sms").
+      Both fields are optional; we only upsert the row when explicitly set.
+      "none" channel IS a valid explicit choice ("don't contact me").
+  · LEGACY (WS-D.5) — age_range + phone still accepted as optional fields
+    so any deployed client keeps working. Phone < 7 digits silently dropped.
+  · Idempotent on repeat submission (same entry_keys collapse server-side
+    via UNIQUE constraint).
 """
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -40,14 +40,13 @@ def _make_app(fake_mcp: _FakeMCP | None = None) -> FastAPI:
     return app
 
 
+# ──────────────────────────── Identity / validation ────────────────────────────
+
+
 @pytest.mark.asyncio
 async def test_anonymous_uuid_rejected():
     app = _make_app()
-    payload = {
-        "user_id": "abc-123-uuid",
-        "name": "Cristian",
-        "age_range": "25-34",
-    }
+    payload = {"user_id": "abc-123-uuid", "name": "Cristian"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/api/v1/users/profile", json=payload)
     assert resp.status_code == 400
@@ -55,98 +54,9 @@ async def test_anonymous_uuid_rejected():
 
 
 @pytest.mark.asyncio
-async def test_invalid_age_range_returns_422():
-    app = _make_app()
-    payload = {
-        "user_id": "google_999",
-        "name": "Cristian",
-        "age_range": "kid",  # not in allowed set
-    }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        resp = await c.post("/api/v1/users/profile", json=payload)
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_happy_path_writes_three_layers():
-    fake = _FakeMCP()
-    app = _make_app(fake)
-    payload = {
-        "user_id": "google_42",
-        "name": "Cristian",
-        "age_range": "25-34",
-        "phone": "+51 999 888 777",
-    }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        resp = await c.post("/api/v1/users/profile", json=payload)
-
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
-    assert len(fake.calls) == 3
-
-    by_key = {c["data"]["entry_key"]: c for c in fake.calls}
-    assert by_key["name"]["data"]["name"] == "Cristian"
-    assert by_key["name"]["data"]["preference"].startswith("Se llama")
-    assert by_key["age_range"]["data"]["age_range"] == "25-34"
-    # Phone normalized: spaces stripped, leading + kept
-    assert by_key["phone"]["data"]["phone"] == "+51999888777"
-    assert by_key["phone"]["data"]["phone_last4"] == "8777"
-    assert all(c["layer"] == "interaction_prefs" for c in fake.calls)
-    assert all(c["user_id"] == "google_42" for c in fake.calls)
-
-
-@pytest.mark.asyncio
-async def test_phone_omitted_skips_phone_layer():
-    fake = _FakeMCP()
-    app = _make_app(fake)
-    payload = {
-        "user_id": "google_42",
-        "name": "Cristian",
-        "age_range": "prefer_not_to_say",
-    }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        resp = await c.post("/api/v1/users/profile", json=payload)
-
-    assert resp.status_code == 200
-    keys = {c["data"]["entry_key"] for c in fake.calls}
-    assert keys == {"name", "age_range"}
-
-
-@pytest.mark.asyncio
-async def test_phone_too_short_silently_dropped():
-    """A 5-digit string isn't a phone — likely a typo. Drop the phone
-    upsert quietly so the user's other fields still land. Returning
-    422 here would force a re-edit in the modal; the user already
-    consented to optional phone."""
-    fake = _FakeMCP()
-    app = _make_app(fake)
-    payload = {
-        "user_id": "google_42",
-        "name": "Cristian",
-        "age_range": "25-34",
-        "phone": "12345",
-    }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        resp = await c.post("/api/v1/users/profile", json=payload)
-
-    assert resp.status_code == 200
-    keys = {c["data"]["entry_key"] for c in fake.calls}
-    assert "phone" not in keys
-    assert keys == {"name", "age_range"}
-
-
-@pytest.mark.asyncio
 async def test_telegram_user_id_accepted():
-    """tg_<id> is also a verified identity (Telegram handler validates
-    chat_id), so profile capture from a future Telegram onboarding
-    flow shouldn't 400."""
-    fake = _FakeMCP()
-    app = _make_app(fake)
-    payload = {
-        "user_id": "tg_42",
-        "name": "Cristian",
-        "age_range": "25-34",
-    }
+    app = _make_app()
+    payload = {"user_id": "tg_42", "name": "Cristian"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/api/v1/users/profile", json=payload)
     assert resp.status_code == 200
@@ -156,11 +66,7 @@ async def test_telegram_user_id_accepted():
 async def test_name_whitespace_only_rejected():
     fake = _FakeMCP()
     app = _make_app(fake)
-    payload = {
-        "user_id": "google_42",
-        "name": "   ",
-        "age_range": "25-34",
-    }
+    payload = {"user_id": "google_42", "name": "   "}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/api/v1/users/profile", json=payload)
     assert resp.status_code == 422
@@ -168,26 +74,186 @@ async def test_name_whitespace_only_rejected():
 
 
 @pytest.mark.asyncio
-async def test_idempotent_double_call_uses_same_entry_keys():
-    """Calling the endpoint twice (e.g. user re-opens modal to fix
-    a typo) produces identical entry_keys both times — the upsert in
-    MCP collapses them into a single row per layer per key."""
+async def test_invalid_proactive_channel_returns_422():
+    """Unsupported channel values must fail Pydantic Literal validation."""
+    app = _make_app()
+    payload = {"user_id": "google_999", "name": "Cristian", "proactive_channel": "fax"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 422
+
+
+# ──────────────────────────── New feature opt-ins (E.8) ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_minimal_payload_just_writes_name():
+    """Submitting only user_id + name (no opt-ins, no legacy fields) must
+    succeed and write exactly one row — the canonical name. This is the
+    smallest valid call after the E.8 reframe."""
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["data"]["entry_key"] == "name"
+    assert fake.calls[0]["data"]["name"] == "Cristian"
+
+
+@pytest.mark.asyncio
+async def test_remember_consent_true_persists_row():
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian", "remember_consent": True}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+
+    assert resp.status_code == 200
+    by_key = {c["data"]["entry_key"]: c["data"] for c in fake.calls}
+    assert "remember_consent" in by_key
+    assert by_key["remember_consent"]["remember"] is True
+
+
+@pytest.mark.asyncio
+async def test_remember_consent_false_persists_row():
+    """An explicit False is meaningfully different from omission — the
+    user said 'no, don't remember', that's a stored decision."""
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian", "remember_consent": False}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    by_key = {c["data"]["entry_key"]: c["data"] for c in fake.calls}
+    assert by_key["remember_consent"]["remember"] is False
+
+
+@pytest.mark.asyncio
+async def test_proactive_channel_none_is_explicit_optout():
+    """'none' is a valid choice — the scheduler reads this row to know
+    NOT to bother the user. It must be stored, not dropped."""
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian", "proactive_channel": "none"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    by_key = {c["data"]["entry_key"]: c["data"] for c in fake.calls}
+    assert by_key["proactive_channel"]["channel"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_proactive_channel_push_persists_row():
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian", "proactive_channel": "push"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    by_key = {c["data"]["entry_key"]: c["data"] for c in fake.calls}
+    assert by_key["proactive_channel"]["channel"] == "push"
+
+
+@pytest.mark.asyncio
+async def test_full_new_payload_writes_all_three():
+    """Full feature-opt-in submission: name + remember + channel."""
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {
+        "user_id": "google_42",
+        "name": "Cristian Lazo",
+        "remember_consent": True,
+        "proactive_channel": "telegram",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    keys = {c["data"]["entry_key"] for c in fake.calls}
+    assert keys == {"name", "remember_consent", "proactive_channel"}
+
+
+# ──────────────────────────── Legacy WS-D.5 backward compat ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_legacy_age_range_still_accepted():
+    """Old WS-D.5 clients submitting age_range must keep working."""
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian", "age_range": "25-34"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    keys = {c["data"]["entry_key"] for c in fake.calls}
+    assert {"name", "age_range"}.issubset(keys)
+
+
+@pytest.mark.asyncio
+async def test_legacy_phone_normalized_and_persisted():
     fake = _FakeMCP()
     app = _make_app(fake)
     payload = {
         "user_id": "google_42",
         "name": "Cristian",
-        "age_range": "25-34",
+        "phone": "+51 999 888 777",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    by_key = {c["data"]["entry_key"]: c["data"] for c in fake.calls}
+    assert by_key["phone"]["phone"] == "+51999888777"
+    assert by_key["phone"]["phone_last4"] == "8777"
+
+
+@pytest.mark.asyncio
+async def test_legacy_phone_too_short_silently_dropped():
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {"user_id": "google_42", "name": "Cristian", "phone": "12345"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 200
+    keys = {c["data"]["entry_key"] for c in fake.calls}
+    assert "phone" not in keys
+
+
+@pytest.mark.asyncio
+async def test_invalid_age_range_returns_422():
+    """Age_range typos hit the Literal validator before the body handler."""
+    app = _make_app()
+    payload = {"user_id": "google_999", "name": "Cristian", "age_range": "kid"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/v1/users/profile", json=payload)
+    assert resp.status_code == 422
+
+
+# ──────────────────────────── Idempotency ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_idempotent_double_call_uses_same_entry_keys():
+    """Submitting twice (e.g. the user reopens the modal to change channel)
+    targets the same entry_keys both times — MCP's UNIQUE constraint
+    collapses them into one row per (user_id, layer, entry_key)."""
+    fake = _FakeMCP()
+    app = _make_app(fake)
+    payload = {
+        "user_id": "google_42",
+        "name": "Cristian",
+        "remember_consent": True,
+        "proactive_channel": "push",
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         await c.post("/api/v1/users/profile", json=payload)
-        # second call with corrected name
-        payload["name"] = "Cristian Lazo"
+        # User changes their mind — switch channel
+        payload["proactive_channel"] = "telegram"
         await c.post("/api/v1/users/profile", json=payload)
 
-    name_calls = [c for c in fake.calls if c["data"]["entry_key"] == "name"]
-    assert len(name_calls) == 2
-    # Both targeted the same entry_key — MCP's UNIQUE constraint will
-    # ensure only one row exists despite the two upsert calls.
-    assert name_calls[0]["data"]["entry_key"] == name_calls[1]["data"]["entry_key"]
-    assert name_calls[1]["data"]["name"] == "Cristian Lazo"
+    channel_calls = [c for c in fake.calls if c["data"]["entry_key"] == "proactive_channel"]
+    assert len(channel_calls) == 2
+    assert channel_calls[0]["data"]["channel"] == "push"
+    assert channel_calls[1]["data"]["channel"] == "telegram"
