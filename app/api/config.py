@@ -34,4 +34,12 @@ async def public_config() -> dict:
     tg_username = os.getenv("TELEGRAM_BOT_USERNAME", "").strip()
     if tg_username:
         cfg["telegram_bot_username"] = tg_username.lstrip("@")
+    # Environment mode. The frontend uses this to render a "LOCAL DEV"
+    # pill so a developer never confuses the local stack with production
+    # mid-test. Default 'local' — production sets ALMA_ENV=prod via the
+    # Cloud Run env vars in cloudbuild.yaml. Only the 'local' badge is
+    # rendered; in prod the field is omitted so nothing leaks to users.
+    env = os.getenv("ALMA_ENV", "local").strip().lower()
+    if env != "prod":
+        cfg["env"] = env
     return cfg
