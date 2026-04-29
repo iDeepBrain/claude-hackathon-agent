@@ -28,7 +28,10 @@ steps:
     args:
       - run
       - deploy
-      - alma-agent
+      # Service name MUST match the existing Cloud Run service serving
+      # alma-bot.com (kept the historical `-dev` suffix even though there
+      # is no separate `-prod` — renaming would orphan the running revision).
+      - alma-agent-dev
       - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alma-agent:$SHORT_SHA'
       - '--region=us-central1'
       - '--platform=managed'
@@ -51,14 +54,20 @@ steps:
       # Telegram link bridge — left as a substitution so a different
       # bot can be used per env without code changes.
       - '--set-env-vars=^|^ENVIRONMENT=production|ALMA_ENV=prod|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92|GOOGLE_OAUTH_CLIENT_ID=${_GOOGLE_OAUTH_CLIENT_ID}|TELEGRAM_BOT_USERNAME=${_TELEGRAM_BOT_USERNAME}'
-      # DEMO_SEED_TOKEN gates POST /api/v1/demo/seed (used to repopulate the
-      # canonical demo persona "Mateo" on alma-bot.com). Set the secret
-      # value in GCP Secret Manager BEFORE the first deploy that needs it.
-      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest,DEMO_SEED_TOKEN=ALMA_DEMO_SEED_TOKEN:latest'
+      # DEMO_SEED_TOKEN gates POST /api/v1/demo/seed. Re-add when the
+      # ALMA_DEMO_SEED_TOKEN secret exists in Secret Manager:
+      #   echo -n "$(openssl rand -base64 32)" | \
+      #     gcloud secrets create ALMA_DEMO_SEED_TOKEN --data-file=-
+      # Then append `,DEMO_SEED_TOKEN=ALMA_DEMO_SEED_TOKEN:latest` to the
+      # --set-secrets list below. Until then, the seed endpoint stays 500.
+      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest'
     waitFor: ['push']
 
 substitutions:
-  _MCP_URL: 'https://alma-mcp-PLACEHOLDER.us-central1.run.app/mcp'
+  # Default MCP_URL points at the existing alma-mcp-dev service. Override
+  # via the build trigger's substitution variable when the project ID
+  # changes (the random hash segment `-s2r4lxjhtq-uc` is project-bound).
+  _MCP_URL: 'https://alma-mcp-dev-s2r4lxjhtq-uc.a.run.app/mcp'
   # Google OAuth Client ID (public, NOT a secret — goes into JS bundles).
   # Set via the trigger's substitution variable. If empty, the
   # /api/v1/config endpoint omits it and the frontend hides the CTA.
