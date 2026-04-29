@@ -47,4 +47,11 @@ async def public_config() -> dict:
     elif not env:
         # Unset — surface a hint so reviewers spot misconfig quickly.
         cfg["env"] = "unset"
+    # WS-D.3 — VAPID public key for browser-side push subscription. Public by
+    # design (the private key never leaves the server). If unset, frontend
+    # hides the push toggle entirely.
+    from app.push.web_push import get_public_key as _vapid_pub
+    vapid_pub = _vapid_pub()
+    if vapid_pub:
+        cfg["vapid_public_key"] = vapid_pub
     return cfg

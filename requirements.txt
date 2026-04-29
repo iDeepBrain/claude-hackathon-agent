@@ -24,3 +24,6 @@ PyYAML>=6.0
 # works without juggling a separate container.
 asyncpg>=0.29.0
 sqlalchemy[asyncio]>=2.0.30
+# WS-D.3 — Web Push (VAPID standard, no Firebase). Sends notifications
+# directly to the user's browser push service via the standard protocol.
+pywebpush>=2.0.0
