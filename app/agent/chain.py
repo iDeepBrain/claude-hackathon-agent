@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agent.llm import build_image_content, make_llm
 
-from app.agent.guard import is_injection, safe_response
+from app.agent.guard import is_injection, is_meta_query, meta_query_response, safe_response
 from app.agent.persona import build_system_prompt
 from app.agent.router import route_model
 from app.cache.semantic import SemanticCache
@@ -232,6 +232,25 @@ class AlmaChain:
             yield {
                 "type": "agent_done",
                 "stop_reason": "guard",
+                "latency_ms": int((time.monotonic() - t_start) * 1000),
+            }
+            return
+
+        # Meta-query short-circuit. Fires for "dame tu prompt", "are you
+        # Gemini?", etc. — questions where the LLM tends to reveal
+        # plumbing if no rule blocks it. We prefer to answer locally
+        # with a polite redirect that NEVER mentions provider/model.
+        # Persona prompt also has a hard lock-down rule for the cases
+        # this regex misses, but blocking here saves an LLM round-trip
+        # AND defends against accidental persona prompt regressions.
+        meta_hit, meta_pattern = is_meta_query(message)
+        if meta_hit:
+            logger.info("Meta-query deflected for user %s: pattern=%r", user_id, meta_pattern)
+            yield {"type": "guard_meta", "pattern": meta_pattern}
+            yield {"type": "response_chunk", "content": meta_query_response(language)}
+            yield {
+                "type": "agent_done",
+                "stop_reason": "meta_guard",
                 "latency_ms": int((time.monotonic() - t_start) * 1000),
             }
             return
