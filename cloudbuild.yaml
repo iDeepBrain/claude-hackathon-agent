@@ -43,7 +43,14 @@ steps:
       # the default 5-minute timeout; bump to 10 minutes so live demos with
       # cold-starts don't get cut mid-response.
       - '--timeout=600'
-      - '--set-env-vars=^|^ENVIRONMENT=production|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92|GOOGLE_OAUTH_CLIENT_ID=${_GOOGLE_OAUTH_CLIENT_ID}'
+      # ALMA_ENV=prod is the production safety flag the reset_local.py
+      # script reads — production refusing the wipe even if someone runs
+      # the script against this Cloud Run instance by accident. Also
+      # gates the "LOCAL DEV" frontend pill (omitted from /config when
+      # not local). TELEGRAM_BOT_USERNAME is needed for the WS-D.4
+      # Telegram link bridge — left as a substitution so a different
+      # bot can be used per env without code changes.
+      - '--set-env-vars=^|^ENVIRONMENT=production|ALMA_ENV=prod|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92|GOOGLE_OAUTH_CLIENT_ID=${_GOOGLE_OAUTH_CLIENT_ID}|TELEGRAM_BOT_USERNAME=${_TELEGRAM_BOT_USERNAME}'
       # DEMO_SEED_TOKEN gates POST /api/v1/demo/seed (used to repopulate the
       # canonical demo persona "Mateo" on alma-bot.com). Set the secret
       # value in GCP Secret Manager BEFORE the first deploy that needs it.
@@ -56,6 +63,11 @@ substitutions:
   # Set via the trigger's substitution variable. If empty, the
   # /api/v1/config endpoint omits it and the frontend hides the CTA.
   _GOOGLE_OAUTH_CLIENT_ID: ''
+  # Telegram bot username (without the @). Public info — used by the
+  # frontend to build the WS-D.4 deep-link `t.me/<username>?start=...`.
+  # Empty = no Telegram channel offered. Override per environment via
+  # the trigger's substitution variable.
+  _TELEGRAM_BOT_USERNAME: ''
 
 options:
   logging: CLOUD_LOGGING_ONLY

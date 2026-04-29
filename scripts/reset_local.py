@@ -83,7 +83,12 @@ def _check_safety_guards() -> tuple[str, str]:
     """Verify env + host whitelist. Returns (database_url, redis_url) or exits."""
     env = os.getenv("ALMA_ENV", "").strip().lower()
     if env != "local":
-        _bail(f"ALMA_ENV must be 'local', got {env!r}. Set ALMA_ENV=local in your .env.")
+        if not env:
+            _bail("ALMA_ENV is unset. This script ONLY runs against local. "
+                  "Set ALMA_ENV=local in your docker-compose environment "
+                  "(production sets ALMA_ENV=prod via cloudbuild.yaml).")
+        _bail(f"ALMA_ENV must be 'local', got {env!r}. "
+              f"Production should NEVER run this script (Cloud Run sets ALMA_ENV=prod).")
 
     db_url = os.getenv("DATABASE_URL", "").strip()
     if not db_url:

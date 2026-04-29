@@ -36,10 +36,15 @@ async def public_config() -> dict:
         cfg["telegram_bot_username"] = tg_username.lstrip("@")
     # Environment mode. The frontend uses this to render a "LOCAL DEV"
     # pill so a developer never confuses the local stack with production
-    # mid-test. Default 'local' — production sets ALMA_ENV=prod via the
-    # Cloud Run env vars in cloudbuild.yaml. Only the 'local' badge is
-    # rendered; in prod the field is omitted so nothing leaks to users.
-    env = os.getenv("ALMA_ENV", "local").strip().lower()
-    if env != "prod":
+    # mid-test. Production sets ALMA_ENV=prod via the Cloud Run env vars
+    # in cloudbuild.yaml. We deliberately do NOT default to 'local' —
+    # an unset variable surfaces as 'local' (the safer assumption for a
+    # reviewer hitting a misconfigured deploy: see the pill, ask). Prod
+    # MUST set ALMA_ENV=prod explicitly to suppress the pill.
+    env = os.getenv("ALMA_ENV", "").strip().lower()
+    if env and env != "prod":
         cfg["env"] = env
+    elif not env:
+        # Unset — surface a hint so reviewers spot misconfig quickly.
+        cfg["env"] = "unset"
     return cfg
