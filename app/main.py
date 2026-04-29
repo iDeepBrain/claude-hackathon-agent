@@ -22,6 +22,7 @@ from app.api.users import router as users_router
 from app.cache.semantic import SemanticCache
 from app.cache.session import RedisSession
 from app.mcp_client.client import MCPClient
+from app.safety.env_guard import validate_all_or_raise
 
 load_dotenv()
 
@@ -31,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # WS-H.2 — Refuse to start if ALMA_ENV does not match the connection URLs.
+    # Defense-in-depth on top of the host whitelist already enforced by
+    # scripts/reset_local.py. A misconfigured deploy crashes here LOUD,
+    # before serving a single request, so Cloud Run keeps the previous
+    # healthy revision instead of routing traffic to a broken one.
+    validate_all_or_raise(("REDIS_URL", "redis"))
+
     try:
         llm_info = await discover_provider()
     except RuntimeError as exc:
