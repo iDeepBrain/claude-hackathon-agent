@@ -144,3 +144,75 @@ async def delete_push_subscription(req: DeleteSubscriptionRequest) -> dict:
     await _update_user_push(user_id, None)
     logger.info("Push subscription cleared for user=%s", user_id)
     return {"ok": True}
+
+
+# ── WS-D.3 demo helper ───────────────────────────────────────────────────────
+
+
+class PushTestRequest(BaseModel):
+    id_token: str
+    title: str | None = None
+    body: str | None = None
+
+
+@router.post("/users/push-test")
+async def push_test(req: PushTestRequest) -> dict:
+    """Send ONE push to the authenticated user, bypassing all scheduler gates.
+
+    Built for demo recordings — lets the operator trigger a real OS-level
+    notification on demand without waiting for breakfast/lunch/dinner slots
+    or the 2h silence window.
+
+    Auth is the same id_token model as the other push endpoints, so this
+    endpoint cannot spam users other than the caller. Returns the outcome
+    from web_push.send_push() so the demo script can show 'sent' / 'expired'
+    feedback inline."""
+    import json as _json
+    import os
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.push.web_push import build_payload, is_configured, send_push
+
+    if not is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Web Push disabled (VAPID env not configured)",
+        )
+
+    info = _verify_google_token(req.id_token)
+    user_id = f"google_{info['sub']}"
+
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured")
+
+    engine = create_async_engine(db_url, pool_pre_ping=True)
+    Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with Session() as session:
+            result = await session.execute(
+                text("SELECT push_subscription FROM alma_users WHERE user_id=:uid"),
+                {"uid": user_id},
+            )
+            row = result.first()
+    finally:
+        await engine.dispose()
+
+    if not row or not row[0]:
+        raise HTTPException(
+            status_code=404,
+            detail="no push subscription on file — activate it in Mi Perfil first",
+        )
+
+    subscription = row[0] if isinstance(row[0], dict) else _json.loads(row[0])
+    payload = build_payload(
+        slot="demo",
+        title=req.title or "Hola, soy Alma",
+        body=req.body or "¿Cómo va tu día? 🌿",
+    )
+
+    outcome = await send_push(subscription, payload)
+    logger.info("Demo push for user=%s outcome=%s", user_id, outcome)
+    return {"ok": True, "outcome": outcome}
