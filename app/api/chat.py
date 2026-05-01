@@ -109,15 +109,41 @@ async def chat(req: ChatRequest, request: Request):
 
 @router.get("/chat/usage")
 async def chat_usage(user_id: str, request: Request):
-    """Returns the current daily counter for the given user_id so the
-    frontend can render a "X of N messages today" indicator without
-    incrementing the counter."""
+    """Returns daily counters for the badge.
+
+    Two counters are tracked server-side: per user_id (UUID) and per
+    client IP. The badge needs a single "X / limit" pair to render —
+    we expose both raw counters and an "effective" projection that
+    reflects whichever cap the caller is closest to.
+
+    A user who clears cookies resets their user_id counter to 0, but
+    the IP counter keeps climbing. The badge using ``used``/``limit``
+    will then surface the IP-side pressure proportionally so the user
+    sees realistic remaining capacity, not a misleading 0/30.
+    """
     redis = request.app.state.scheduler_redis
-    key = f"rate:chat:user:{user_id}:{today_utc()}"
-    used = await peek_rate_limit(redis, key)
+    today = today_utc()
+    user_key = f"rate:chat:user:{user_id}:{today}"
+    ip_key = f"rate:chat:ip:{_client_ip(request)}:{today}"
+    user_used = await peek_rate_limit(redis, user_key)
+    ip_used = await peek_rate_limit(redis, ip_key)
+
+    # Effective = whichever counter sits closer to its cap, projected
+    # back into the user-counter scale so the badge math stays "X / 30".
+    user_pct = (user_used / CHAT_USER_DAILY_LIMIT) if CHAT_USER_DAILY_LIMIT else 0.0
+    ip_pct = (ip_used / CHAT_IP_DAILY_LIMIT) if CHAT_IP_DAILY_LIMIT else 0.0
+    effective_pct = max(user_pct, ip_pct)
+    effective_used = min(CHAT_USER_DAILY_LIMIT, round(effective_pct * CHAT_USER_DAILY_LIMIT))
+
     return {
         "user_id": user_id,
-        "used": used,
+        # Primary fields the badge reads — kept stable for backward compat.
+        "used": effective_used,
         "limit": CHAT_USER_DAILY_LIMIT,
-        "remaining": max(0, CHAT_USER_DAILY_LIMIT - used),
+        "remaining": max(0, CHAT_USER_DAILY_LIMIT - effective_used),
+        # Raw counters for observability + future UI variants.
+        "user_used": user_used,
+        "user_limit": CHAT_USER_DAILY_LIMIT,
+        "ip_used": ip_used,
+        "ip_limit": CHAT_IP_DAILY_LIMIT,
     }
