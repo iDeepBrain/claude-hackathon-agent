@@ -17,12 +17,19 @@ message text — only metadata (counts, scores, layers, latency, model name).
 from __future__ import annotations
 
 import json
+import os
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app.utils.rate_limit import check_rate_limit, peek_rate_limit, today_utc
+
 router = APIRouter()
+
+# Public-demo limits. Override at deploy time without touching code.
+CHAT_USER_DAILY_LIMIT = int(os.getenv("CHAT_USER_DAILY_LIMIT", "30"))
+CHAT_IP_DAILY_LIMIT = int(os.getenv("CHAT_IP_DAILY_LIMIT", "100"))
 
 
 class ChatRequest(BaseModel):
@@ -32,8 +39,40 @@ class ChatRequest(BaseModel):
     language: str = "es"  # es | en
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP. Honours X-Forwarded-For / X-Real-IP when set
+    by the reverse proxy (nginx / Cloudflare). Falls back to the socket peer."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        # Left-most entry is the original client; everything else is proxies.
+        return fwd.split(",")[0].strip()
+    real = request.headers.get("x-real-ip")
+    if real:
+        return real.strip()
+    return request.client.host if request.client else "unknown"
+
+
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
+    redis = request.app.state.scheduler_redis
+    today = today_utc()
+
+    user_key = f"rate:chat:user:{req.user_id}:{today}"
+    ip_key = f"rate:chat:ip:{_client_ip(request)}:{today}"
+
+    user_ok, _ = await check_rate_limit(redis, user_key, CHAT_USER_DAILY_LIMIT)
+    ip_ok, _ = await check_rate_limit(redis, ip_key, CHAT_IP_DAILY_LIMIT)
+
+    if not (user_ok and ip_ok):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "daily_limit_reached",
+                "message": "You've reached today's message limit on the public demo. Come back tomorrow 💛",
+                "limit": CHAT_USER_DAILY_LIMIT,
+            },
+        )
+
     alma_chain = request.app.state.alma_chain
 
     async def generate():
@@ -50,3 +89,19 @@ async def chat(req: ChatRequest, request: Request):
                 yield {"event": event_type, "data": json.dumps(payload, default=str)}
 
     return EventSourceResponse(generate())
+
+
+@router.get("/chat/usage")
+async def chat_usage(user_id: str, request: Request):
+    """Returns the current daily counter for the given user_id so the
+    frontend can render a "X of N messages today" indicator without
+    incrementing the counter."""
+    redis = request.app.state.scheduler_redis
+    key = f"rate:chat:user:{user_id}:{today_utc()}"
+    used = await peek_rate_limit(redis, key)
+    return {
+        "user_id": user_id,
+        "used": used,
+        "limit": CHAT_USER_DAILY_LIMIT,
+        "remaining": max(0, CHAT_USER_DAILY_LIMIT - used),
+    }
