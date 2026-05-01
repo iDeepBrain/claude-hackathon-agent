@@ -48,6 +48,56 @@ def _claims() -> dict[str, str]:
     return {"sub": os.environ["VAPID_SUBJECT"]}
 
 
+_CACHED_PRIVATE_KEY: str | None = None
+
+
+def _vapid_private_key_for_pywebpush() -> str:
+    """Return the VAPID private key in the exact form pywebpush expects:
+    URL-safe base64 of the DER-encoded PKCS8 key.
+
+    Why this exists: pywebpush calls Vapid.from_string(...) which auto-detects
+    the format via heuristics on the string. PEM keys are accepted in theory,
+    but Cloud Run's env-var injection can mangle multi-line PEM (escaping
+    newlines as \\n, stripping BEGIN/END headers, etc.) — when that happens,
+    py_vapid silently falls through to from_der() and crashes with
+    'invalid length / could not deserialize'.
+
+    Bullet-proof fix: detect PEM ourselves, decode via the cryptography lib
+    (which is already a transitive dep), and re-encode as DER-b64 single line.
+    Cached so we only do the expensive parse once per process.
+    """
+    global _CACHED_PRIVATE_KEY
+    if _CACHED_PRIVATE_KEY is not None:
+        return _CACHED_PRIVATE_KEY
+
+    raw = os.environ["VAPID_PRIVATE_KEY"].strip()
+
+    # Some env injectors deliver multi-line values as a single line with
+    # literal "\n" sequences. Normalize before format detection.
+    if "\\n" in raw and "\n" not in raw:
+        raw = raw.replace("\\n", "\n")
+
+    if "BEGIN" in raw:
+        # PEM → load via cryptography → re-encode as DER → URL-safe b64.
+        import base64
+
+        from cryptography.hazmat.primitives import serialization
+
+        key = serialization.load_pem_private_key(raw.encode(), password=None)
+        der = key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        _CACHED_PRIVATE_KEY = base64.urlsafe_b64encode(der).rstrip(b"=").decode("ascii")
+    else:
+        # Already in DER-b64 (single line) form.
+        _CACHED_PRIVATE_KEY = raw
+
+    logger.info("VAPID private key normalized for pywebpush (len=%d)", len(_CACHED_PRIVATE_KEY))
+    return _CACHED_PRIVATE_KEY
+
+
 async def send_push(subscription: dict, payload: dict) -> PushOutcome:
     """Send one notification. Returns 'sent' / 'expired' / 'failed'.
 
@@ -66,7 +116,7 @@ def _send_blocking(subscription: dict, payload: dict) -> PushOutcome:
         webpush(
             subscription_info=subscription,
             data=json.dumps(payload),
-            vapid_private_key=os.environ["VAPID_PRIVATE_KEY"],
+            vapid_private_key=_vapid_private_key_for_pywebpush(),
             vapid_claims=_claims(),
             timeout=10,
         )
