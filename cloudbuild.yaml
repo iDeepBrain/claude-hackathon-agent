@@ -70,7 +70,7 @@ steps:
       # the secrets created via secrets/sync.sh in claude-hackathon-infra).
       # If left unset, the agent's /api/v1/config omits vapid_public_key
       # and the frontend hides the push toggle (fail-closed by design).
-      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest,VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,VAPID_SUBJECT=VAPID_SUBJECT:latest'
+      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest,VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,VAPID_SUBJECT=VAPID_SUBJECT:latest,ALMA_INTERNAL_TOKEN=ALMA_INTERNAL_TOKEN:latest'
     waitFor: ['push']
 
 substitutions:

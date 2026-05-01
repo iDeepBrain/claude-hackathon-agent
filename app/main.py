@@ -147,6 +147,18 @@ app.add_middleware(
 )
 logger.info("CORS allowlist: %s", _cors_origins)
 
+# Bearer-token guard — closes the direct-curl bypass on the public
+# agent URL. Fail-open until the ALMA_INTERNAL_TOKEN env var is bound
+# from Secret Manager. nginx + telegram-bot inject the same token in
+# their outbound requests; only those flows reach protected endpoints.
+from app.middleware.internal_auth import InternalAuthMiddleware as _InternalAuthMiddleware
+
+app.add_middleware(
+    _InternalAuthMiddleware,
+    token=os.getenv("ALMA_INTERNAL_TOKEN", ""),
+    environment=os.getenv("ALMA_ENV", ""),
+)
+
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(memory_router, prefix="/api/v1")
 app.include_router(proactivity_router, prefix="/api/v1")
