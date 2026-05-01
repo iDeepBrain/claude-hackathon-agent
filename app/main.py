@@ -118,6 +118,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Alma Agent", lifespan=lifespan)
 
+# CORS allowlist. The web flow goes through nginx as same-origin so the
+# browser never sends an Origin requiring CORS — this middleware exists
+# to restrict cross-origin abuse of the public Cloud Run URL itself.
+# Override at deploy with ALMA_CORS_ORIGINS=comma,separated,list.
+from fastapi.middleware.cors import CORSMiddleware as _CORSMiddleware
+
+_default_cors = ",".join([
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "https://alma-web-dev-s2r4lxjhtq-uc.a.run.app",
+    "https://alma-agent-dev-s2r4lxjhtq-uc.a.run.app",
+    "https://alma-bot.com",
+    "https://www.alma-bot.com",
+])
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("ALMA_CORS_ORIGINS", _default_cors).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    _CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    max_age=600,
+)
+logger.info("CORS allowlist: %s", _cors_origins)
+
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(memory_router, prefix="/api/v1")
 app.include_router(proactivity_router, prefix="/api/v1")

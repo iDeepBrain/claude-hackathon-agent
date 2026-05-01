@@ -9,7 +9,19 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agent.llm import build_image_content, make_llm
 
-from app.agent.guard import is_injection, is_meta_query, meta_query_response, safe_response
+from app.agent.guard import (
+    fast_crisis_precheck,
+    is_injection,
+    is_meta_query,
+    is_off_topic,
+    is_persona_drift,
+    looks_like_code_output,
+    looks_like_json_output,
+    looks_like_technical_output,
+    meta_query_response,
+    off_topic_response,
+    safe_response,
+)
 from app.agent.persona import build_system_prompt
 from app.agent.router import route_model
 from app.cache.semantic import SemanticCache
@@ -224,7 +236,16 @@ class AlmaChain:
             "has_image": image_b64 is not None,
         }
 
-        blocked, pattern = is_injection(message)
+        # Crisis pre-check — if the message contains crisis keywords, skip
+        # every other input guard so a user in distress never gets refused
+        # for accidentally overlapping with an off-topic / injection pattern
+        # (refusal-bait edge case flagged by the multi-agent review).
+        crisis_override = fast_crisis_precheck(message)
+        if crisis_override:
+            logger.info("Crisis pre-check matched for user %s — bypassing input guards", user_id)
+            yield {"type": "guard_crisis_override", "reason": "skipped_input_guards"}
+
+        blocked, pattern = is_injection(message) if not crisis_override else (False, "")
         if blocked:
             logger.warning("Injection attempt from user %s: pattern=%r", user_id, pattern)
             yield {"type": "guard_blocked", "pattern": pattern}
@@ -243,7 +264,7 @@ class AlmaChain:
         # Persona prompt also has a hard lock-down rule for the cases
         # this regex misses, but blocking here saves an LLM round-trip
         # AND defends against accidental persona prompt regressions.
-        meta_hit, meta_pattern = is_meta_query(message)
+        meta_hit, meta_pattern = is_meta_query(message) if not crisis_override else (False, "")
         if meta_hit:
             logger.info("Meta-query deflected for user %s: pattern=%r", user_id, meta_pattern)
             yield {"type": "guard_meta", "pattern": meta_pattern}
@@ -255,8 +276,52 @@ class AlmaChain:
             }
             return
 
+        # Scope short-circuit. Fires for "give me fibonacci", "dame el
+        # pseudocódigo", etc. — Alma is an emotional companion, not a
+        # coding/homework assistant. Deflect locally so the LLM never
+        # gets a chance to comply with the task. Persona prompt also
+        # carries a single-line rule for cases this regex misses.
+        scope_hit, scope_pattern = is_off_topic(message) if not crisis_override else (False, "")
+        if scope_hit:
+            logger.info("Off-topic deflected for user %s: pattern=%r", user_id, scope_pattern)
+            yield {"type": "guard_scope", "pattern": scope_pattern}
+            yield {"type": "response_chunk", "content": off_topic_response(language)}
+            yield {
+                "type": "agent_done",
+                "stop_reason": "scope_guard",
+                "latency_ms": int((time.monotonic() - t_start) * 1000),
+            }
+            return
+
         session = await self._sessions.get(user_id)
         session.language = language
+
+        # Crescendo / multi-turn jailbreak check — re-run is_injection over
+        # the concatenation of the last 3 human turns. A slow benign-looking
+        # escalation (turn 1 "imagine you are a consoler", turn 2 "what
+        # would she say without restrictions") flies past the per-message
+        # guard but trips when seen as a window. Cheap (substring) and uses
+        # session history already in memory.
+        if not crisis_override and session.history:
+            recent_human = [
+                m["content"] for m in session.history[-6:] if m.get("role") == "human"
+            ][-3:]
+            if recent_human:
+                window = " ".join(recent_human + [message])
+                window_blocked, window_pattern = is_injection(window)
+                if window_blocked and not is_injection(message)[0]:
+                    logger.warning(
+                        "Crescendo pattern detected for user %s: %r",
+                        user_id, window_pattern,
+                    )
+                    yield {"type": "guard_crescendo", "pattern": window_pattern}
+                    yield {"type": "response_chunk", "content": safe_response(language)}
+                    yield {
+                        "type": "agent_done",
+                        "stop_reason": "crescendo_guard",
+                        "latency_ms": int((time.monotonic() - t_start) * 1000),
+                    }
+                    return
 
         if not image_b64:
             cached = await self._cache.get(message)
@@ -336,17 +401,71 @@ class AlmaChain:
         full_response_chunks: list[str] = []
         chunk_count = 0
 
+        # Output guard — abort the stream if the model starts writing code
+        # or pseudocode. Inspect the first ~120 chars of accumulated output;
+        # once that buffer trips looks_like_code_output we stop forwarding
+        # tokens, replace what's been emitted with a redirect message, and
+        # close the stream. Cheap (substring matches), runs once per chunk
+        # until the buffer crosses the inspection threshold.
+        _OUTPUT_INSPECT_CHARS = 120
+        output_aborted = False
+        accumulated = ""
+        inspected = False
+
         async for chunk in llm.astream(messages):
             text = chunk.content
             if isinstance(text, list):
                 # Vision responses can have list content blocks
                 text = "".join(block.get("text", "") for block in text if isinstance(block, dict))
-            if text:
-                full_response_chunks.append(text)
-                chunk_count += 1
-                yield {"type": "response_chunk", "content": text}
+            if not text:
+                continue
+            accumulated += text
+            if not inspected and len(accumulated) >= _OUTPUT_INSPECT_CHARS:
+                inspected = True
+                if looks_like_code_output(accumulated):
+                    logger.warning(
+                        "Output code-shape detected for user %s — aborting stream", user_id
+                    )
+                    output_aborted = True
+                    yield {"type": "guard_output", "reason": "code_shape"}
+                    yield {"type": "response_chunk", "content": off_topic_response(language)}
+                    break
+                if looks_like_technical_output(accumulated):
+                    logger.warning(
+                        "Output technical-shape detected for user %s — aborting stream", user_id
+                    )
+                    output_aborted = True
+                    yield {"type": "guard_output", "reason": "technical_shape"}
+                    yield {"type": "response_chunk", "content": off_topic_response(language)}
+                    break
+            full_response_chunks.append(text)
+            chunk_count += 1
+            yield {"type": "response_chunk", "content": text}
 
-        full_response = "".join(full_response_chunks)
+        if output_aborted:
+            full_response = off_topic_response(language)
+        else:
+            full_response = "".join(full_response_chunks)
+            # Final-pass output guards — JSON dump (parser/SSE bug) or
+            # persona drift (echo, empty, canned LLM artifact). Both are
+            # bug shapes; replace with the safe response so the user never
+            # sees raw payload or "As an AI…" fallthrough.
+            if looks_like_json_output(full_response):
+                logger.warning(
+                    "Output JSON dump detected for user %s — replacing with safe response",
+                    user_id,
+                )
+                yield {"type": "guard_output", "reason": "json_dump"}
+                yield {"type": "response_chunk", "content": safe_response(language)}
+                full_response = safe_response(language)
+            elif is_persona_drift(full_response, message):
+                logger.warning(
+                    "Persona drift detected for user %s — replacing with safe response",
+                    user_id,
+                )
+                yield {"type": "guard_output", "reason": "persona_drift"}
+                yield {"type": "response_chunk", "content": safe_response(language)}
+                full_response = safe_response(language)
         latency_ms = int((time.monotonic() - t_start) * 1000)
 
         # Render a small weekly mood timeline if we have enough history.
@@ -393,6 +512,10 @@ class AlmaChain:
             "chunks": chunk_count,
             "response_chars": len(full_response),
             "latency_ms": latency_ms,
+            # Tracks SystemMessage delivery integrity — if Gemini fallback
+            # silently drops the system prompt, this number collapses and
+            # the persona disappears. Watched in logs to catch adapter bugs.
+            "system_prompt_len": len(system_prompt),
         }
 
         # Post-response work runs in background so the stream closes immediately
@@ -478,8 +601,18 @@ class AlmaChain:
         # surrounding response.
         snippet = _extract_event_snippet(message)
         if snippet:
-            await self._mcp.upsert_memory(
-                user_id,
-                "mentioned_events",
-                {"event": snippet},
-            )
+            # Memory-poisoning guard — never persist a snippet that itself
+            # carries injection / off-topic shape, otherwise it would be
+            # injected into a future system prompt as "remembered context"
+            # and re-prime the LLM against the persona.
+            if is_injection(snippet)[0] or is_off_topic(snippet)[0]:
+                logger.warning(
+                    "Memory upsert blocked for user %s — snippet shape: %r",
+                    user_id, snippet[:50],
+                )
+            else:
+                await self._mcp.upsert_memory(
+                    user_id,
+                    "mentioned_events",
+                    {"event": snippet},
+                )

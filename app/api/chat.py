@@ -30,6 +30,12 @@ router = APIRouter()
 # Public-demo limits. Override at deploy time without touching code.
 CHAT_USER_DAILY_LIMIT = int(os.getenv("CHAT_USER_DAILY_LIMIT", "30"))
 CHAT_IP_DAILY_LIMIT = int(os.getenv("CHAT_IP_DAILY_LIMIT", "100"))
+# Max raw chars per message — bounds the token budget per request and
+# blocks unbounded-consumption DoS attempts (OWASP LLM10). Default 500
+# is generous for a single emotional-support turn (~80–100 words) while
+# keeping per-request cost predictable. Override with the env var when
+# legitimate long-form content is expected.
+CHAT_MAX_MESSAGE_CHARS = int(os.getenv("CHAT_MAX_MESSAGE_CHARS", "500"))
 
 
 class ChatRequest(BaseModel):
@@ -54,6 +60,16 @@ def _client_ip(request: Request) -> str:
 
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
+    if len(req.message or "") > CHAT_MAX_MESSAGE_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "message_too_long",
+                "message": f"Message exceeds {CHAT_MAX_MESSAGE_CHARS} characters. Send something shorter 💛",
+                "limit": CHAT_MAX_MESSAGE_CHARS,
+            },
+        )
+
     redis = request.app.state.scheduler_redis
     today = today_utc()
 
