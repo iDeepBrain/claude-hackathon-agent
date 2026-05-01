@@ -17,6 +17,7 @@ from app.agent.guard import (
     is_persona_drift,
     looks_like_code_output,
     looks_like_json_output,
+    looks_like_persona_leak,
     looks_like_technical_output,
     meta_query_response,
     off_topic_response,
@@ -437,6 +438,14 @@ class AlmaChain:
                     output_aborted = True
                     yield {"type": "guard_output", "reason": "technical_shape"}
                     yield {"type": "response_chunk", "content": off_topic_response(language)}
+                    break
+                if looks_like_persona_leak(accumulated):
+                    logger.warning(
+                        "Persona-leak shape detected for user %s — aborting stream", user_id
+                    )
+                    output_aborted = True
+                    yield {"type": "guard_output", "reason": "persona_leak"}
+                    yield {"type": "response_chunk", "content": meta_query_response(language)}
                     break
             full_response_chunks.append(text)
             chunk_count += 1

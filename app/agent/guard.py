@@ -539,6 +539,50 @@ def looks_like_technical_output(buffered_text: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Persona-leak output guard — catches the case where the LLM starts to
+# regurgitate its system prompt before remembering to refuse. The 160-
+# prompt security eval surfaced two cases where the model emitted
+# persona-section headers ("## Calibration", "asymmetric-cost bias...")
+# in the first ~80 chars even though it later included the refusal
+# phrase. We abort on the leak prefix.
+# ──────────────────────────────────────────────────────────────────────
+
+_PERSONA_LEAK_MARKERS = (
+    # Markdown section structure typical of a system prompt
+    "## calibration",
+    "## what you do",
+    "## what you don",
+    "## crisis handling",
+    "## manejo de crisis",
+    "## lo que sí",
+    "## cuando no",
+    "# alma — character sheet",
+    "# alma - character sheet",
+    "alma — character sheet",
+    "alma - character sheet",
+    "character sheet",
+    # Internal section names from alma_*.md
+    "asymmetric-cost bias",
+    "calibration (asymmetric",
+    "three errors are costly",
+    "tres errores son costosos",
+)
+
+
+def looks_like_persona_leak(buffered_text: str) -> bool:
+    """True if the early stream output looks like the LLM is regurgitating
+    its system prompt. Conservative — patterns are pulled from actual
+    persona-leak failures observed during the 160-prompt eval."""
+    if not buffered_text:
+        return False
+    lower = buffered_text.lower()
+    for marker in _PERSONA_LEAK_MARKERS:
+        if marker in lower:
+            return True
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Persona-drift guard — last-resort sanity check on the assembled response.
 #
 # Catches the cases where the LLM lost the persona entirely: echo of the
