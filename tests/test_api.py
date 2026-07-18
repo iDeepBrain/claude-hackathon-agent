@@ -20,15 +20,22 @@ def make_app(stream_chunks: list[str] | None = None, language_in_session: str = 
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(proactivity_router, prefix="/api/v1")
 
-    # Mock alma_chain
+    # Mock alma_chain — both legacy stream() (string yields) and new stream_events() (dict yields)
     chunks = stream_chunks or ["hola desde mock"]
 
     async def mock_stream(user_id, message, image_b64=None, language="es"):
         for chunk in chunks:
             yield chunk
 
+    async def mock_stream_events(user_id, message, image_b64=None, language="es"):
+        yield {"type": "agent_start", "language": language, "has_image": image_b64 is not None}
+        for chunk in chunks:
+            yield {"type": "response_chunk", "content": chunk}
+        yield {"type": "agent_done", "stop_reason": "end_turn", "chunks": len(chunks), "latency_ms": 0}
+
     mock_chain = MagicMock()
     mock_chain.stream = mock_stream
+    mock_chain.stream_events = mock_stream_events
 
     # Mock mcp_client
     mock_mcp = MagicMock()

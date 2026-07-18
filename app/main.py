@@ -10,13 +10,21 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.agent.chain import AlmaChain
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
+from app.api.config import router as config_router
 from app.api.cron import router as cron_router
+from app.api.demo import router as demo_router
+from app.api.health import health_router, ready_router
 from app.api.memory import router as memory_router
 from app.api.proactivity import router as proactivity_router
+from app.api.push import router as push_router
+from app.api.telegram_link import router as telegram_link_router
+from app.api.users import router as users_router
 from app.cache.semantic import SemanticCache
 from app.cache.session import RedisSession
 from app.mcp_client.client import MCPClient
+from app.safety.env_guard import validate_all_or_raise
 
 load_dotenv()
 
@@ -26,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # WS-H.2 — Refuse to start if ALMA_ENV does not match the connection URLs.
+    # Defense-in-depth on top of the host whitelist already enforced by
+    # scripts/reset_local.py. A misconfigured deploy crashes here LOUD,
+    # before serving a single request, so Cloud Run keeps the previous
+    # healthy revision instead of routing traffic to a broken one.
+    validate_all_or_raise(("REDIS_URL", "redis"))
+
     try:
         llm_info = await discover_provider()
     except RuntimeError as exc:
@@ -33,6 +48,22 @@ async def lifespan(app: FastAPI):
         llm_info = {"provider": "none", "model": None, "preferred": "claude-opus-4-7", "fallback_reason": str(exc)}
     app.state.llm_info = llm_info
     logger.info("LLM elected at startup: %s / %s", llm_info.get("provider"), llm_info.get("model"))
+
+    # WS-H.4 — Seed llm_health with the boot-time discovery so /ready works
+    # before the refresher has had a chance to run.
+    import time as _time
+    app.state.llm_health = {
+        "ok": llm_info.get("provider") not in (None, "none"),
+        "provider": llm_info.get("provider"),
+        "model": llm_info.get("model"),
+        "error": llm_info.get("fallback_reason"),
+        "last_probed_at": _time.time(),
+    }
+
+    # Background refresher — keeps app.state.llm_health fresh every 60s.
+    from app.safety.llm_refresher import refresher_loop
+    llm_refresher_task = asyncio.create_task(refresher_loop(app, interval_s=60.0))
+    app.state.llm_refresher_task = llm_refresher_task
 
     redis_url = os.environ["REDIS_URL"]
     mcp_url = os.environ["MCP_URL"]
@@ -76,27 +107,68 @@ async def lifespan(app: FastAPI):
     yield
     if scheduler:
         scheduler.shutdown(wait=False)
+    # WS-H.4 — cancel the refresher cleanly on shutdown
+    llm_refresher_task.cancel()
+    try:
+        await llm_refresher_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Alma Agent shutting down")
 
 
 app = FastAPI(title="Alma Agent", lifespan=lifespan)
 
+# CORS allowlist. The web flow goes through nginx as same-origin so the
+# browser never sends an Origin requiring CORS — this middleware exists
+# to restrict cross-origin abuse of the public Cloud Run URL itself.
+# Override at deploy with ALMA_CORS_ORIGINS=comma,separated,list.
+from fastapi.middleware.cors import CORSMiddleware as _CORSMiddleware
+
+_default_cors = ",".join([
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "https://alma-bot.com",
+    "https://www.alma-bot.com",
+])
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("ALMA_CORS_ORIGINS", _default_cors).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    _CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    max_age=600,
+)
+logger.info("CORS allowlist: %s", _cors_origins)
+
+# Bearer-token guard — closes the direct-curl bypass on the public
+# agent URL. Fail-open until the ALMA_INTERNAL_TOKEN env var is bound
+# from Secret Manager. nginx + telegram-bot inject the same token in
+# their outbound requests; only those flows reach protected endpoints.
+from app.middleware.internal_auth import InternalAuthMiddleware as _InternalAuthMiddleware
+
+app.add_middleware(
+    _InternalAuthMiddleware,
+    token=os.getenv("ALMA_INTERNAL_TOKEN", ""),
+    environment=os.getenv("ALMA_ENV", ""),
+)
+
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(memory_router, prefix="/api/v1")
 app.include_router(proactivity_router, prefix="/api/v1")
+app.include_router(demo_router, prefix="/api/v1")  # POST /api/v1/demo/seed
+app.include_router(auth_router, prefix="/api/v1")  # POST /api/v1/auth/google
+app.include_router(config_router, prefix="/api/v1")  # GET /api/v1/config (public client config)
+app.include_router(users_router, prefix="/api/v1")  # POST /api/v1/users/profile (onboarding)
+app.include_router(telegram_link_router, prefix="/api/v1")
+app.include_router(push_router, prefix="/api/v1")  # WS-D.3 — Web Push subscription  # POST /api/v1/users/telegram-link/token
 app.include_router(cron_router)  # Cloud Scheduler: /cron/proactive/{slot}
-
-
-@app.get("/health")
-async def health(request: Request):
-    info = getattr(request.app.state, "llm_info", {})
-    return {
-        "status": "ok",
-        "provider": info.get("provider", "unknown"),
-        "model": info.get("model"),
-        "preferred": info.get("preferred", "claude-opus-4-7"),
-        "fallback_reason": info.get("fallback_reason"),
-    }
+app.include_router(health_router)              # GET /health (shallow, liveness) — WS-H.4
+app.include_router(ready_router, prefix="/api/v1")  # GET /api/v1/ready (deep dep check) — WS-H.4
 
 
 @app.exception_handler(Exception)

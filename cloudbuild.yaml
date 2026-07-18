@@ -28,7 +28,10 @@ steps:
     args:
       - run
       - deploy
-      - alma-agent
+      # Service name MUST match the existing Cloud Run service serving
+      # alma-bot.com (kept the historical `-dev` suffix even though there
+      # is no separate `-prod` — renaming would orphan the running revision).
+      - alma-agent-dev
       - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alma-agent:$SHORT_SHA'
       - '--region=us-central1'
       - '--platform=managed'
@@ -36,15 +39,54 @@ steps:
       - '--port=8000'
       - '--memory=1Gi'
       - '--cpu=1'
-      - '--min-instances=1'
+      - '--min-instances=0'
       - '--max-instances=3'
       - '--concurrency=80'
-      - '--set-env-vars=^|^ENVIRONMENT=production|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92'
-      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest'
+      # SSE conversational streams + parallel mood/crisis tasks can exceed
+      # the default 5-minute timeout; bump to 10 minutes so live demos with
+      # cold-starts don't get cut mid-response.
+      - '--timeout=600'
+      # ALMA_ENV=prod is the production safety flag the reset_local.py
+      # script reads — production refusing the wipe even if someone runs
+      # the script against this Cloud Run instance by accident. Also
+      # gates the "LOCAL DEV" frontend pill (omitted from /config when
+      # not local). TELEGRAM_BOT_USERNAME is needed for the WS-D.4
+      # Telegram link bridge — left as a substitution so a different
+      # bot can be used per env without code changes.
+      # LLM chain configured per user preference (post WS-H.6 incident):
+      # primary stays Anthropic (Claude is the hackathon target); secondary
+      # is Gemini with flash-lite as HIGH (fastest + cheapest) and flash as
+      # LOW (richer fallback). Order matters — discover_provider() probes
+      # PRIMARY_HIGH → PRIMARY_LOW → SECONDARY_HIGH → SECONDARY_LOW and
+      # pins the first that pings successfully.
+      - '--set-env-vars=^|^ENVIRONMENT=production|ALMA_ENV=prod|LOG_LEVEL=INFO|MCP_URL=${_MCP_URL}|SCHEDULER_ENABLED=false|PROACTIVE_TZ=America/Lima|PROACTIVE_BREAKFAST_H=8|PROACTIVE_LUNCH_H=13|PROACTIVE_DINNER_H=19|PROACTIVE_SILENCE_WINDOW_H=2|SESSION_TTL=86400|CACHE_TTL=3600|CACHE_THRESHOLD=0.92|GOOGLE_OAUTH_CLIENT_ID=${_GOOGLE_OAUTH_CLIENT_ID}|TELEGRAM_BOT_USERNAME=${_TELEGRAM_BOT_USERNAME}|LLM_PRIMARY_PROVIDER=anthropic|LLM_PRIMARY_MODEL_HIGH=claude-opus-4-7|LLM_PRIMARY_MODEL_LOW=claude-haiku-4-5-20251001|LLM_SECONDARY_PROVIDER=gemini|LLM_SECONDARY_MODEL_HIGH=gemini-2.5-flash-lite|LLM_SECONDARY_MODEL_LOW=gemini-2.5-flash|LLM_MAX_TOKENS_HIGH=4096|LLM_MAX_TOKENS_LOW=2048'
+      # DEMO_SEED_TOKEN gates POST /api/v1/demo/seed. Re-add when the
+      # ALMA_DEMO_SEED_TOKEN secret exists in Secret Manager:
+      #   echo -n "$(openssl rand -base64 32)" | \
+      #     gcloud secrets create ALMA_DEMO_SEED_TOKEN --data-file=-
+      # Then append `,DEMO_SEED_TOKEN=ALMA_DEMO_SEED_TOKEN:latest` to the
+      # --set-secrets list below. Until then, the seed endpoint stays 500.
+      # WS-D.3 — VAPID keys appended for Web Push (3 new env vars from
+      # the secrets created via secrets/sync.sh in claude-hackathon-infra).
+      # If left unset, the agent's /api/v1/config omits vapid_public_key
+      # and the frontend hides the push toggle (fail-closed by design).
+      - '--set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,DATABASE_URL=ALMA_DATABASE_URL:latest,REDIS_URL=ALMA_REDIS_URL:latest,CRON_TOKEN=ALMA_CRON_TOKEN:latest,VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,VAPID_SUBJECT=VAPID_SUBJECT:latest,ALMA_INTERNAL_TOKEN=ALMA_INTERNAL_TOKEN:latest'
     waitFor: ['push']
 
 substitutions:
-  _MCP_URL: 'https://alma-mcp-PLACEHOLDER.us-central1.run.app/mcp'
+  # Default MCP_URL points at the deployed alma-mcp-dev service. Set this
+  # to your own Cloud Run URL via the build trigger's substitution
+  # variable (the hash segment `-PROJECTHASH-uc` is project-bound).
+  _MCP_URL: 'https://alma-mcp-dev-PROJECTHASH-uc.a.run.app/mcp'
+  # Google OAuth Client ID (public, NOT a secret — goes into JS bundles).
+  # Set via the trigger's substitution variable. If empty, the
+  # /api/v1/config endpoint omits it and the frontend hides the CTA.
+  _GOOGLE_OAUTH_CLIENT_ID: ''
+  # Telegram bot username (without the @). Public info — used by the
+  # frontend to build the WS-D.4 deep-link `t.me/<username>?start=...`.
+  # Empty = no Telegram channel offered. Override per environment via
+  # the trigger's substitution variable.
+  _TELEGRAM_BOT_USERNAME: ''
 
 options:
   logging: CLOUD_LOGGING_ONLY

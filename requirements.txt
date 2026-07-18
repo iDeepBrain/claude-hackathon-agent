@@ -16,3 +16,14 @@ pytest>=8.0.0
 pytest-asyncio>=0.23.0
 fakeredis[aioredis]>=2.20.0
 apscheduler>=3.10
+google-auth>=2.30.0
+PyYAML>=6.0
+# Postgres direct access — used ONLY by scripts/reset_local.py (the
+# runtime path goes through MCP). Adding here keeps the dev tooling
+# self-contained: `docker compose exec agent python scripts/reset_local.py`
+# works without juggling a separate container.
+asyncpg>=0.29.0
+sqlalchemy[asyncio]>=2.0.30
+# WS-D.3 — Web Push (VAPID standard, no Firebase). Sends notifications
+# directly to the user's browser push service via the standard protocol.
+pywebpush>=2.0.0
