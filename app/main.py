@@ -127,8 +127,6 @@ from fastapi.middleware.cors import CORSMiddleware as _CORSMiddleware
 _default_cors = ",".join([
     "http://localhost:3000",
     "http://localhost:8080",
-    "https://alma-web-dev-s2r4lxjhtq-uc.a.run.app",
-    "https://alma-agent-dev-s2r4lxjhtq-uc.a.run.app",
     "https://alma-bot.com",
     "https://www.alma-bot.com",
 ])

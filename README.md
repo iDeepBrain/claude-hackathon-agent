@@ -2,6 +2,8 @@
 
 Alma's FastAPI backend — LangChain LCEL pipeline with Redis semantic cache, injection guard, and MCP memory client.
 
+> Part of the **Alma** system — an emotional AI companion for mental health. See [claude-hackathon-alma](https://github.com/iDeepBrain/claude-hackathon-alma) for the full architecture, diagrams, and project overview.
+
 ## Prerequisites
 
 - Docker + Docker Compose
@@ -178,3 +180,7 @@ curl -N -X POST http://localhost:8080/api/v1/trigger \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u123", "trigger_type": "morning_checkin"}'
 ```
+
+---
+
+Built by [Cristian Lazo Quispe](https://github.com/CristianLazoQuispe). Licensed under MIT (© iDeepBrain).

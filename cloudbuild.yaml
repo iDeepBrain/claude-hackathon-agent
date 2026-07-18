@@ -39,7 +39,7 @@ steps:
       - '--port=8000'
       - '--memory=1Gi'
       - '--cpu=1'
-      - '--min-instances=1'
+      - '--min-instances=0'
       - '--max-instances=3'
       - '--concurrency=80'
       # SSE conversational streams + parallel mood/crisis tasks can exceed
@@ -74,10 +74,10 @@ steps:
     waitFor: ['push']
 
 substitutions:
-  # Default MCP_URL points at the existing alma-mcp-dev service. Override
-  # via the build trigger's substitution variable when the project ID
-  # changes (the random hash segment `-s2r4lxjhtq-uc` is project-bound).
-  _MCP_URL: 'https://alma-mcp-dev-s2r4lxjhtq-uc.a.run.app/mcp'
+  # Default MCP_URL points at the deployed alma-mcp-dev service. Set this
+  # to your own Cloud Run URL via the build trigger's substitution
+  # variable (the hash segment `-PROJECTHASH-uc` is project-bound).
+  _MCP_URL: 'https://alma-mcp-dev-PROJECTHASH-uc.a.run.app/mcp'
   # Google OAuth Client ID (public, NOT a secret — goes into JS bundles).
   # Set via the trigger's substitution variable. If empty, the
   # /api/v1/config endpoint omits it and the frontend hides the CTA.

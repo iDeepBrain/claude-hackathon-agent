@@ -1,0 +1,5 @@
+# gitleaks allowlist — reviewed findings that are NOT real secrets.
+# b69801aeb42b9ed50288274872aff6274f238475:CLAUDE.md:generic-api-key:88
+# CLAUDE.md — false positive: the line is 'TELEGRAM_BOT_TOKEN=<token de BotFather>',
+# a placeholder in a .env example, not a real token. Confirmed via git history.
+b69801aeb42b9ed50288274872aff6274f238475:CLAUDE.md:generic-api-key:88
